@@ -64,8 +64,8 @@ public class RollCycleMultiThreadStressTest {
     private ChronicleQueue sharedWriterQueue;
 
     public RollCycleMultiThreadStressTest() {
-        SLEEP_PER_WRITE_NANOS = Long.getLong("writeLatency", 30_000);
-        TEST_TIME = Integer.getInteger("testTime", 2);
+        SLEEP_PER_WRITE_NANOS = Long.getLong("writeLatency", 100_000);
+        TEST_TIME = Integer.getInteger("testTime", 600);
         ROLL_EVERY_MS = Integer.getInteger("rollEvery", 300);
         DELAY_READER_RANDOM_MS = Integer.getInteger("delayReader", 1);
         DELAY_WRITER_RANDOM_MS = Integer.getInteger("delayWriter", 1);
@@ -102,11 +102,29 @@ public class RollCycleMultiThreadStressTest {
     }
     PretoucherThread pretoucherThread = null;
 
+    public void runOnlyReader() throws Throwable {
+        final File file = new File("/home/glukos/test-queue");
+
+        final int numThreads = CORES;
+        final int numWriters = numThreads / 4 + 1;
+        final int expectedNumberOfMessages = (int) (TEST_TIME * 1e9 / SLEEP_PER_WRITE_NANOS) * Math.max(1, numWriters / 2);
+
+
+        final Reader r = new Reader(file, expectedNumberOfMessages);
+        final Throwable t = r.call();
+
+        if (t == null) {
+            System.out.println("Reading ended successfully");
+        }
+        else
+            throw t;
+    }
+
     @Test
     public void stress() throws Exception {
         assert warnIfAssertsAreOn();
 
-        File file = DirectoryUtils.tempDir("stress");
+        File file = new File("/home/glukos/test-queue");
 //        System.out.printf("Queue dir: %s at %s%n", file.getAbsolutePath(), Instant.now());
         final int numThreads = CORES;
         final int numWriters = numThreads / 4 + 1;
@@ -530,7 +548,10 @@ public class RollCycleMultiThreadStressTest {
         }
     }
 
-    public static void main(String[] args) throws IOException, InterruptedException, Exception {
+    public static void main(String[] args) throws Throwable {
+        if (Boolean.getBoolean("onlyReader"))
+            new RollCycleMultiThreadStressTest().runOnlyReader();
+
         new RollCycleMultiThreadStressTest().stress();
     }
 }
