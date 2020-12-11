@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InternalFileUtil.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.internal.util</a> &gt; <span class="el_source">InternalFileUtil.java</span></div><h1>InternalFileUtil.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.internal.util;
+
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
+import net.openhft.chronicle.queue.main.RemovableRollFileCandidatesMain;
+import net.openhft.chronicle.queue.util.FileState;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.*;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Stream;
+
+import static java.util.Comparator.comparing;
+import static java.util.stream.Collectors.toList;
+
+/**
+ * Utility methods for handling Files in connection with ChronicleQueue.
+ *
+ * @author Per Minborg
+ * @since 5.17.34
+ */
+public final class InternalFileUtil {
+
+<span class="fc" id="L27">    private static final Comparator&lt;File&gt; EARLIEST_FIRST = comparing(File::getName);</span>
+
+    private InternalFileUtil() {}
+
+    /**
+     * Produces a list of removable roll file candidates and prints
+     * their absolute path to standard out row-by-row.
+     *
+     * @param args the directory. If no directory is given, &quot;.&quot; is assumed
+     */
+    @Deprecated /* For removal, Use RemovableRollFileCandidatesMain.main instead */
+    public static void main(String[] args) {
+<span class="nc" id="L39">        RemovableRollFileCandidatesMain.main(args);</span>
+<span class="nc" id="L40">    }</span>
+
+    /**
+     * Returns a Stream of roll Queue files that are likely removable
+     * from the given {@code baseDir} without affecting any Queue
+     * process that is currently active in the given {@code baseDir} reading
+     * data sequentially.
+     * &lt;p&gt;
+     * Files are returned in order of creation and can successively be removed
+     * in that order. If the removal of a particular file fails, then subsequent
+     * files must be untouched.
+     * &lt;p&gt;
+     * WARNING: This method is inherently un-deterministic as new Queue processes may
+     * join or leave at any time asynchronously. Thus, it is not recommended to store
+     * results produced by this method for longer periods.
+     * &lt;p&gt;
+     * Only sequential reading is supported because random access Tailers can read at
+     * any location at any time.
+     * &lt;p&gt;
+     * Here is an example of how unused files can be removed:
+     *
+     * &lt;pre&gt;{@code
+     *     for (File file : removableFileCandidates(baseDir).collect(Collectors.toList())) {
+     *         if (!file.delete()) {
+     *             break;
+     *         }
+     *     }
+     * }&lt;/pre&gt;
+     *
+     * @param baseDir containing queue file removal candidates
+     * @return a Stream of roll Queue files that are likely removable
+     *         from the given {@code baseDir} without affecting any Queue
+     *         process that is currently active in the given {@code baseDir}
+     *         reading data sequentially
+     * @throws UnsupportedOperationException if this operation is not
+     *         supported for the current platform (e.g. Windows).
+     */
+    @NotNull
+    public static Stream&lt;File&gt; removableRollFileCandidates(@NotNull File baseDir) {
+<span class="nc" id="L79">        assertOsSupported();</span>
+<span class="nc" id="L80">        final File[] files = baseDir.listFiles(InternalFileUtil::hasQueueSuffix);</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (files == null)</span>
+<span class="nc" id="L82">            return Stream.empty();</span>
+
+<span class="nc" id="L84">        final List&lt;File&gt; sortedInitialCandidates = Stream.of(files)</span>
+<span class="nc" id="L85">            .sorted(EARLIEST_FIRST)</span>
+<span class="nc" id="L86">            .collect(toList());</span>
+
+<span class="nc" id="L88">        final Stream.Builder&lt;File&gt; builder = Stream.builder();</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        for (File file : sortedInitialCandidates) {</span>
+            // If one file is not closed, discard it and the rest in the sequence
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            if (state(file) != FileState.CLOSED) break;</span>
+<span class="nc" id="L92">            builder.accept(file);</span>
+<span class="nc" id="L93">        }</span>
+
+<span class="nc" id="L95">        return builder.build();</span>
+    }
+
+    /**
+     * Returns if the provided {@code file} has the Chronicle Queue file
+     * suffix. The current file suffix is &quot;.cq4&quot;.
+     *
+     * @param     file to check
+     * @return    if the provided {@code file} has the ChronicleQueue file
+     *            suffix
+     */
+    public static boolean hasQueueSuffix(@NotNull File file) {
+<span class="fc" id="L107">        return file.getName().endsWith(SingleChronicleQueue.SUFFIX);</span>
+    }
+
+    /**
+     * Returns if the given {@code file } is used by any process (i.e.
+     * has the file open for reading or writing).
+     * &lt;p&gt;
+     * If the open state of the given {@code file} can not be determined, {@code true }
+     * is returned.
+     *
+     * @param    file to check
+     * @return   if the given {@code file } is used by any process
+     * @throws   UnsupportedOperationException if this operation is not
+     *           supported for the current platform (e.g. Windows).
+     */
+    public static FileState state(@NotNull File file) {
+<span class="fc" id="L123">        assertOsSupported();</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        if (!file.exists()) return FileState.NON_EXISTENT;</span>
+<span class="fc" id="L125">        final String absolutePath = file.getAbsolutePath();</span>
+        try {
+<span class="fc" id="L127">            final Process process = new ProcessBuilder(new String[]{&quot;lsof&quot;, &quot;|&quot;, &quot;grep&quot;, absolutePath}).start();</span>
+<span class="fc" id="L128">            try  (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {</span>
+<span class="fc" id="L129">                return reader.lines()</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">                    .anyMatch(l -&gt; l.contains(absolutePath))</span>
+                    ? FileState.OPEN
+                    : FileState.CLOSED;
+            } finally {
+<span class="fc" id="L134">                process.destroyForcibly();</span>
+            }
+<span class="nc" id="L136">        } catch(IOException ignored) {</span>
+            // Do nothing
+        }
+<span class="nc" id="L139">        return FileState.UNDETERMINED;</span>
+    }
+
+    /**
+     * Returns if the given {@code file } is used by any process (i.e.
+     * has the file open for reading or writing).
+     *
+     * @param    file to check
+     * @return   if the given {@code file } is used by any process
+     */
+    // Todo: Here is a candidate for Windows. Verify that it works
+    private static FileState stateWindows(@NotNull File file) {
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (!file.exists()) return FileState.NON_EXISTENT;</span>
+<span class="nc" id="L152">        try (RandomAccessFile randomAccessFile = new RandomAccessFile(file, &quot;rw&quot;);</span>
+<span class="nc" id="L153">             FileChannel fileChannel = randomAccessFile.getChannel()) {</span>
+
+<span class="nc" id="L155">            final FileLock fileLock = fileChannel.tryLock();</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (fileLock != null) {</span>
+<span class="nc" id="L157">                fileLock.close();</span>
+<span class="nc" id="L158">                return FileState.CLOSED;</span>
+            }
+<span class="nc" id="L160">            return FileState.OPEN;</span>
+<span class="nc" id="L161">        } catch (IOException ignored) {</span>
+            // Do nothing
+        }
+<span class="nc" id="L164">        return FileState.UNDETERMINED;</span>
+    }
+
+    private static void assertOsSupported() {
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">        if (OS.isWindows()) {</span>
+<span class="nc" id="L169">            throw new UnsupportedOperationException(&quot;This operation is not supported under Windows.&quot;);</span>
+        }
+<span class="fc" id="L171">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

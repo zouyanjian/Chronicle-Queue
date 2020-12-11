@@ -1,0 +1,1276 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StoreTailer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">StoreTailer.java</span></div><h1>StoreTailer.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.util.DecoratedBufferUnderflowException;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.annotation.PackageLocal;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.core.pool.StringBuilderPool;
+import net.openhft.chronicle.core.values.LongValue;
+import net.openhft.chronicle.queue.*;
+import net.openhft.chronicle.queue.impl.ExcerptContext;
+import net.openhft.chronicle.queue.impl.WireStore;
+import net.openhft.chronicle.queue.impl.WireStorePool;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.io.EOFException;
+import java.io.File;
+import java.io.StreamCorruptedException;
+import java.text.ParseException;
+
+import static net.openhft.chronicle.bytes.NoBytesStore.NO_PAGE;
+import static net.openhft.chronicle.core.UnsafeMemory.UNSAFE;
+import static net.openhft.chronicle.queue.TailerDirection.*;
+import static net.openhft.chronicle.queue.TailerState.*;
+import static net.openhft.chronicle.queue.impl.single.ScanResult.END_OF_FILE;
+import static net.openhft.chronicle.queue.impl.single.ScanResult.FOUND;
+import static net.openhft.chronicle.wire.NoDocumentContext.INSTANCE;
+import static net.openhft.chronicle.wire.Wires.END_OF_DATA;
+import static net.openhft.chronicle.wire.Wires.isEndOfFile;
+
+/**
+ * Tailer
+ */
+<span class="pc bpc" id="L38" title="1 of 2 branches missed.">class StoreTailer extends AbstractCloseable</span>
+        implements ExcerptTailer, SourceContext, ExcerptContext {
+    static final int INDEXING_LINEAR_SCAN_THRESHOLD = 70;
+<span class="fc" id="L41">    static final StringBuilderPool SBP = new StringBuilderPool();</span>
+<span class="fc" id="L42">    static final EOFException EOF_EXCEPTION = new EOFException();</span>
+    @NotNull
+    private final SingleChronicleQueue queue;
+    private final WireStorePool storePool;
+    private final LongValue indexValue;
+<span class="fc" id="L47">    private final StoreTailerContext context = new StoreTailerContext();</span>
+<span class="fc" id="L48">    private final MoveToState moveToState = new MoveToState();</span>
+    long index; // index of the next read.
+    @Nullable
+    SingleChronicleQueueStore store;
+    private int cycle;
+<span class="fc" id="L53">    private TailerDirection direction = TailerDirection.FORWARD;</span>
+    private Wire wireForIndex;
+    private boolean readAfterReplicaAcknowledged;
+<span class="fc" id="L56">    @NotNull</span>
+    private TailerState state = UNINITIALISED;
+<span class="fc" id="L58">    private long indexAtCreation = Long.MIN_VALUE;</span>
+<span class="fc" id="L59">    private boolean readingDocumentFound = false;</span>
+<span class="fc" id="L60">    private long address = NO_PAGE;</span>
+<span class="fc" id="L61">    private boolean striding = false;</span>
+    private final Finalizer finalizer;
+    private boolean disableThreadSafetyCheck;
+
+    public StoreTailer(@NotNull final SingleChronicleQueue queue, WireStorePool storePool) {
+<span class="fc" id="L66">        this(queue, storePool, null);</span>
+<span class="fc" id="L67">    }</span>
+
+<span class="fc" id="L69">    public StoreTailer(@NotNull final SingleChronicleQueue queue, WireStorePool storePool, final LongValue indexValue) {</span>
+<span class="fc" id="L70">        boolean error = true;</span>
+        try {
+<span class="fc" id="L72">            this.queue = queue;</span>
+<span class="fc" id="L73">            this.storePool = storePool;</span>
+<span class="fc" id="L74">            this.indexValue = indexValue;</span>
+<span class="fc" id="L75">            this.setCycle(Integer.MIN_VALUE);</span>
+<span class="fc" id="L76">            this.index = 0;</span>
+<span class="fc" id="L77">            queue.addCloseListener(this);</span>
+
+<span class="fc bfc" id="L79" title="All 2 branches covered.">            if (indexValue == null) {</span>
+<span class="fc" id="L80">                toStart();</span>
+            } else {
+<span class="fc" id="L82">                moveToIndex(indexValue.getVolatileValue());</span>
+            }
+<span class="pc bpc" id="L84" title="1 of 2 branches missed.">            finalizer = Jvm.isResourceTracing() ? new Finalizer() : null;</span>
+<span class="fc" id="L85">            error = false;</span>
+        } finally {
+<span class="fc bfc" id="L87" title="All 2 branches covered.">            if (error)</span>
+<span class="fc" id="L88">                close();</span>
+        }
+<span class="fc" id="L90">    }</span>
+
+    @Override
+    public ExcerptTailer disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
+<span class="fc" id="L94">        this.disableThreadSafetyCheck = disableThreadSafetyCheck;</span>
+<span class="fc" id="L95">        return this;</span>
+    }
+
+    @Override
+    protected boolean threadSafetyCheck(boolean isUsed) {
+<span class="fc bfc" id="L100" title="All 2 branches covered.">        return disableThreadSafetyCheck</span>
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">                || super.threadSafetyCheck(isUsed);</span>
+    }
+
+    @Override
+    public boolean readDocument(@NotNull final ReadMarshallable reader) {
+<span class="fc" id="L106">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L108">        try (@NotNull DocumentContext dc = readingDocument(false)) {</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">            if (!dc.isPresent())</span>
+<span class="fc" id="L110">                return false;</span>
+<span class="fc" id="L111">            reader.readMarshallable(dc.wire());</span>
+        }
+<span class="fc" id="L113">        return true;</span>
+    }
+
+    @Override
+    @NotNull
+    public DocumentContext readingDocument() {
+//        throwExceptionIfClosed();
+
+        // trying to create an initial document without a direction should not consume a message
+<span class="fc" id="L122">        final long index = index();</span>
+<span class="pc bpc" id="L123" title="1 of 8 branches missed.">        if (direction == NONE &amp;&amp; (index == indexAtCreation || index == 0) &amp;&amp; !readingDocumentFound) {</span>
+<span class="fc" id="L124">            return INSTANCE;</span>
+        }
+<span class="fc" id="L126">        return readingDocument(false);</span>
+    }
+
+    @Override
+    protected void performClose() {
+<span class="fc" id="L131">        Closeable.closeQuietly(indexValue);</span>
+        // the wire ref count will be released here by setting it to null
+<span class="fc" id="L133">        context.wire(null);</span>
+<span class="fc" id="L134">        final Wire w0 = wireForIndex;</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        if (w0 != null)</span>
+<span class="fc" id="L136">            w0.bytes().releaseLast();</span>
+<span class="fc" id="L137">        wireForIndex = null;</span>
+<span class="fc" id="L138">        releaseStore();</span>
+<span class="fc" id="L139">    }</span>
+
+    @Override
+    public Wire wire() {
+<span class="fc" id="L143">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L145">        return privateWire();</span>
+    }
+
+    public Wire privateWire() {
+<span class="fc" id="L149">        return context.wire();</span>
+    }
+
+    @Override
+    public Wire wireForIndex() {
+<span class="fc" id="L154">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L156">        return wireForIndex;</span>
+    }
+
+    @Override
+    public long timeoutMS() {
+<span class="nc" id="L161">        return queue.timeoutMS;</span>
+    }
+
+    @Override
+    public int sourceId() {
+<span class="fc" id="L166">        return queue.sourceId;</span>
+    }
+
+    @NotNull
+    @Override
+    public String toString() {
+<span class="nc" id="L172">        final long index = index();</span>
+<span class="nc" id="L173">        return &quot;StoreTailer{&quot; +</span>
+<span class="nc" id="L174">                &quot;index sequence=&quot; + queue.rollCycle().toSequenceNumber(index) +</span>
+<span class="nc" id="L175">                &quot;, index cycle=&quot; + queue.rollCycle().toCycle(index) +</span>
+                &quot;, store=&quot; + store + &quot;, queue=&quot; + queue + '}';
+    }
+
+    @NotNull
+    @Override
+    public DocumentContext readingDocument(final boolean includeMetaData) {
+<span class="fc" id="L182">        throwExceptionIfClosed();</span>
+
+        try {
+//            Jvm.optionalSafepoint();
+<span class="fc" id="L186">            boolean next = false, tryAgain = true;</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">            if (state == FOUND_IN_CYCLE) {</span>
+                try {
+//                    Jvm.optionalSafepoint();
+<span class="fc" id="L190">                    next = inACycle(includeMetaData);</span>
+//                    Jvm.optionalSafepoint();
+
+<span class="fc" id="L193">                    tryAgain = false;</span>
+<span class="fc" id="L194">                } catch (EOFException eof) {</span>
+<span class="fc" id="L195">                    state = TailerState.END_OF_CYCLE;</span>
+<span class="fc" id="L196">                }</span>
+            }
+//            Jvm.optionalSafepoint();
+
+<span class="fc bfc" id="L200" title="All 2 branches covered.">            if (tryAgain)</span>
+<span class="fc" id="L201">                next = next0(includeMetaData);</span>
+
+//            Jvm.optionalSafepoint();
+<span class="fc bfc" id="L204" title="All 2 branches covered.">            if (context.present(next)) {</span>
+<span class="fc" id="L205">                Bytes&lt;?&gt; bytes = context.wire().bytes();</span>
+<span class="fc" id="L206">                context.setStart(bytes.readPosition() - 4);</span>
+<span class="fc" id="L207">                readingDocumentFound = true;</span>
+<span class="fc" id="L208">                address = bytes.addressForRead(bytes.readPosition(), 4);</span>
+//                Jvm.optionalSafepoint();
+<span class="fc" id="L210">                return context;</span>
+            }
+//            Jvm.optionalSafepoint();
+
+<span class="fc" id="L214">            RollCycle rollCycle = queue.rollCycle();</span>
+<span class="pc bpc" id="L215" title="1 of 4 branches missed.">            if (state == CYCLE_NOT_FOUND &amp;&amp; direction == FORWARD) {</span>
+<span class="fc" id="L216">                int firstCycle = queue.firstCycle();</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">                if (rollCycle.toCycle(index()) &lt; firstCycle)</span>
+<span class="fc" id="L218">                    toStart();</span>
+<span class="pc bpc" id="L219" title="4 of 6 branches missed.">            } else if (!next &amp;&amp; state == CYCLE_NOT_FOUND &amp;&amp; cycle != queue.cycle()) {</span>
+                // appenders have moved on, it's possible that linearScan is hitting EOF, which is ignored
+                // since we can't find an entry at current index, indicate that we're at the end of a cycle
+<span class="nc" id="L222">                state = TailerState.END_OF_CYCLE;</span>
+            }
+
+<span class="fc bfc" id="L225" title="All 2 branches covered.">            setAddress(context.wire() != null);</span>
+
+<span class="nc" id="L227">        } catch (StreamCorruptedException e) {</span>
+<span class="nc" id="L228">            throw new IllegalStateException(e);</span>
+<span class="nc" id="L229">        } catch (UnrecoverableTimeoutException notComplete) {</span>
+            // so treat as empty.
+<span class="nc" id="L231">        } catch (DecoratedBufferUnderflowException e) {</span>
+            // read-only tailer view is fixed, a writer could continue past the end of the view
+            // at the point this tailer was created. Log a warning and return no document.
+<span class="nc bnc" id="L234" title="All 2 branches missed.">            if (queue.isReadOnly()) {</span>
+<span class="nc" id="L235">                Jvm.warn().on(StoreTailer.class, &quot;Tried to read past the end of a read-only view. &quot; +</span>
+                        &quot;Underlying data store may have grown since this tailer was created.&quot;, e);
+            } else {
+<span class="nc" id="L238">                throw e;</span>
+            }
+<span class="pc" id="L240">        }</span>
+<span class="fc" id="L241">        return INSTANCE;</span>
+    }
+
+    @SuppressWarnings(&quot;restriction&quot;)
+    @Override
+    public boolean peekDocument() {
+<span class="fc" id="L247">        throwExceptionIfClosed();</span>
+
+<span class="pc bpc" id="L249" title="1 of 6 branches missed.">        if (address == NO_PAGE || state != FOUND_IN_CYCLE || direction != FORWARD)</span>
+<span class="fc" id="L250">            return peekDocument0();</span>
+
+<span class="fc" id="L252">        final int header = UNSAFE.getIntVolatile(null, address);</span>
+
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">        if (header == END_OF_DATA)</span>
+<span class="nc" id="L255">            return peekDocument0();</span>
+
+<span class="fc bfc" id="L257" title="All 2 branches covered.">        return header &gt; 0x0;</span>
+    }
+
+    private boolean peekDocument0() {
+<span class="fc" id="L261">        try (DocumentContext dc = readingDocument()) {</span>
+<span class="fc" id="L262">            dc.rollbackOnClose();</span>
+<span class="fc" id="L263">            return dc.isPresent();</span>
+        }
+    }
+
+    private boolean next0(final boolean includeMetaData) throws UnrecoverableTimeoutException, StreamCorruptedException {
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">        for (int i = 0; i &lt; 1000; i++) {</span>
+<span class="pc bpc" id="L269" title="1 of 7 branches missed.">            switch (state) {</span>
+                case UNINITIALISED:
+<span class="fc" id="L271">                    final long firstIndex = queue.firstIndex();</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">                    if (firstIndex == Long.MAX_VALUE)</span>
+<span class="fc" id="L273">                        return false;</span>
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">                    if (!moveToIndexInternal(firstIndex))</span>
+<span class="nc" id="L275">                        return false;</span>
+                    break;
+
+                case NOT_REACHED_IN_CYCLE:
+<span class="fc" id="L279">                    boolean found = moveToIndexInternal(index);</span>
+<span class="fc" id="L280">                    return found;</span>
+
+                case FOUND_IN_CYCLE: {
+                    try {
+<span class="fc" id="L284">                        return inACycle(includeMetaData);</span>
+<span class="nc" id="L285">                    } catch (EOFException eof) {</span>
+<span class="nc" id="L286">                        state = TailerState.END_OF_CYCLE;</span>
+                    }
+<span class="nc" id="L288">                    break;</span>
+                }
+
+                case END_OF_CYCLE:
+<span class="fc bfc" id="L292" title="All 2 branches covered.">                    if (endOfCycle()) {</span>
+//                        Jvm.optionalSafepoint();
+<span class="fc" id="L294">                        continue;</span>
+                    }
+
+<span class="fc" id="L297">                    return false;</span>
+
+                case BEYOND_START_OF_CYCLE:
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">                    if (beyondStartOfCycle())</span>
+<span class="nc" id="L301">                        continue;</span>
+<span class="fc" id="L302">                    return false;</span>
+
+                case CYCLE_NOT_FOUND:
+<span class="fc bfc" id="L305" title="All 2 branches covered.">                    if (nextCycleNotFound())</span>
+<span class="fc" id="L306">                        continue;</span>
+<span class="fc" id="L307">                    return false;</span>
+
+                default:
+<span class="nc" id="L310">                    throw new AssertionError(&quot;state=&quot; + state);</span>
+            }
+        }
+
+<span class="nc" id="L314">        throw new IllegalStateException(&quot;Unable to progress to the next cycle, state=&quot; + state);</span>
+    }
+
+    private boolean endOfCycle() {
+<span class="fc" id="L318">        final long oldIndex = this.index();</span>
+<span class="fc" id="L319">        final int currentCycle = queue.rollCycle().toCycle(oldIndex);</span>
+<span class="fc" id="L320">        final long nextIndex = nextIndexWithNextAvailableCycle(currentCycle);</span>
+
+<span class="fc bfc" id="L322" title="All 2 branches covered.">        if (nextIndex != Long.MIN_VALUE) {</span>
+<span class="fc" id="L323">            return nextEndOfCycle(nextIndex);</span>
+        } else {
+<span class="fc" id="L325">            state = END_OF_CYCLE;</span>
+        }
+<span class="fc" id="L327">        return false;</span>
+    }
+
+    private boolean beyondStartOfCycle() throws StreamCorruptedException {
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">        if (direction == FORWARD) {</span>
+<span class="nc" id="L332">            state = UNINITIALISED;</span>
+<span class="nc" id="L333">            return true;</span>
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">        } else if (direction == BACKWARD) {</span>
+<span class="fc" id="L335">            return beyondStartOfCycleBackward();</span>
+        }
+<span class="nc" id="L337">        throw new AssertionError(&quot;direction not set, direction=&quot; + direction);</span>
+    }
+
+    private boolean nextEndOfCycle(final long nextIndex) {
+<span class="fc bfc" id="L341" title="All 2 branches covered.">        if (moveToIndexInternal(nextIndex)) {</span>
+<span class="fc" id="L342">            state = FOUND_IN_CYCLE;</span>
+//            Jvm.optionalSafepoint();
+<span class="fc" id="L344">            return true;</span>
+        }
+//        Jvm.optionalSafepoint();
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        if (state == END_OF_CYCLE) {</span>
+//            Jvm.optionalSafepoint();
+<span class="fc" id="L349">            return true;</span>
+        }
+<span class="pc bpc" id="L351" title="1 of 2 branches missed.">        if (cycle &lt; queue.lastCycle()) {</span>
+            // we have encountered an empty file without an EOF marker
+<span class="nc" id="L353">            state = END_OF_CYCLE;</span>
+//            Jvm.optionalSafepoint();
+<span class="nc" id="L355">            return true;</span>
+        }
+        // We are here because we are waiting for an entry to be written to this file.
+        // Winding back to the previous cycle results in a re-initialisation of all the objects =&gt; garbage
+<span class="fc" id="L359">        int nextCycle = queue.rollCycle().toCycle(nextIndex);</span>
+<span class="fc" id="L360">        cycle(nextCycle);</span>
+<span class="fc" id="L361">        state = CYCLE_NOT_FOUND;</span>
+<span class="fc" id="L362">        return false;</span>
+    }
+
+    private boolean beyondStartOfCycleBackward() throws StreamCorruptedException {
+        // give the position of the last entry and
+        // flag we want to count it even though we don't know if it will be meta data or not.
+
+<span class="fc" id="L369">        final boolean foundCycle = cycle(queue.rollCycle().toCycle(index()));</span>
+
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">        if (foundCycle) {</span>
+<span class="nc" id="L372">            final long lastSequenceNumberInThisCycle = store().sequenceForPosition(this, Long.MAX_VALUE, false);</span>
+<span class="nc" id="L373">            final long nextIndex = queue.rollCycle().toIndex(this.cycle, lastSequenceNumberInThisCycle);</span>
+<span class="nc" id="L374">            moveToIndexInternal(nextIndex);</span>
+<span class="nc" id="L375">            state = FOUND_IN_CYCLE;</span>
+<span class="nc" id="L376">            return true;</span>
+        }
+
+<span class="fc" id="L379">        final int cycle = queue.rollCycle().toCycle(index());</span>
+<span class="fc" id="L380">        final long nextIndex = nextIndexWithNextAvailableCycle(cycle);</span>
+
+<span class="pc bpc" id="L382" title="1 of 2 branches missed.">        if (nextIndex != Long.MIN_VALUE) {</span>
+<span class="nc" id="L383">            moveToIndexInternal(nextIndex);</span>
+<span class="nc" id="L384">            state = FOUND_IN_CYCLE;</span>
+<span class="nc" id="L385">            return true;</span>
+        }
+
+<span class="fc" id="L388">        state = BEYOND_START_OF_CYCLE;</span>
+<span class="fc" id="L389">        return false;</span>
+    }
+
+    private boolean nextCycleNotFound() {
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">        if (index() == Long.MIN_VALUE) {</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">            if (this.store != null)</span>
+<span class="nc" id="L395">                queue.closeStore(this.store);</span>
+<span class="nc" id="L396">            this.store = null;</span>
+<span class="nc" id="L397">            return false;</span>
+        }
+
+<span class="fc bfc" id="L400" title="All 2 branches covered.">        if (moveToIndexInternal(index())) {</span>
+<span class="fc" id="L401">            state = FOUND_IN_CYCLE;</span>
+<span class="fc" id="L402">            return true;</span>
+        }
+<span class="fc" id="L404">        return false;</span>
+    }
+
+    private boolean inACycle(final boolean includeMetaData) throws EOFException {
+//        Jvm.optionalSafepoint();
+<span class="fc bfc" id="L409" title="All 4 branches covered.">        if (readAfterReplicaAcknowledged &amp;&amp; inACycleCheckRep()) return false;</span>
+
+//        Jvm.optionalSafepoint();
+<span class="pc bpc" id="L412" title="1 of 4 branches missed.">        if (direction != TailerDirection.FORWARD &amp;&amp; !inACycleNotForward()) return false;</span>
+//        Jvm.optionalSafepoint();
+
+<span class="fc" id="L415">        final Wire wire = privateWire();</span>
+<span class="fc" id="L416">        final Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="fc" id="L417">        return inACycle2(includeMetaData, wire, bytes);</span>
+    }
+
+    private boolean inACycle2(boolean includeMetaData, Wire wire, Bytes&lt;?&gt; bytes) throws EOFException {
+<span class="fc" id="L421">        bytes.readLimitToCapacity();</span>
+
+<span class="pc bpc" id="L423" title="1 of 5 branches missed.">        switch (wire.readDataHeader(includeMetaData)) {</span>
+            case NONE:
+//                Jvm.optionalSafepoint();
+                // no more polling - appender will always write (or recover) EOF
+<span class="fc" id="L427">                return false;</span>
+            case META_DATA:
+//                Jvm.optionalSafepoint();
+<span class="fc" id="L430">                context.metaData(true);</span>
+<span class="fc" id="L431">                break;</span>
+            case DATA:
+//                Jvm.optionalSafepoint();
+<span class="fc" id="L434">                context.metaData(false);</span>
+<span class="fc" id="L435">                break;</span>
+            case EOF:
+<span class="fc" id="L437">                throw EOF_EXCEPTION;</span>
+        }
+
+//        Jvm.optionalSafepoint();
+<span class="fc" id="L441">        inACycleFound(bytes);</span>
+//        Jvm.optionalSafepoint();
+<span class="fc" id="L443">        return true;</span>
+    }
+
+    private boolean inACycleCheckRep() {
+<span class="fc" id="L447">        final long lastSequenceAck = queue.lastAcknowledgedIndexReplicated();</span>
+<span class="fc" id="L448">        final long index = index();</span>
+<span class="fc bfc" id="L449" title="All 2 branches covered.">        return index &gt; lastSequenceAck;</span>
+    }
+
+    private boolean inACycleNotForward() {
+//        Jvm.optionalSafepoint();
+<span class="fc bfc" id="L454" title="All 2 branches covered.">        if (!moveToIndexInternal(index())) {</span>
+            try {
+//                Jvm.optionalSafepoint();
+                // after toEnd() call, index is past the end of the queue
+                // so try to go back one (to the last record in the queue)
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">                if ((int) queue.rollCycle().toSequenceNumber(index()) &lt; 0) {</span>
+<span class="nc" id="L460">                    long lastSeqNum = store.lastSequenceNumber(this);</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">                    if (lastSeqNum == -1) {</span>
+<span class="nc" id="L462">                        windBackCycle(cycle);</span>
+<span class="nc" id="L463">                        return moveToIndexInternal(index());</span>
+                    }
+
+<span class="nc" id="L466">                    return moveToIndexInternal(queue.rollCycle().toIndex(cycle, lastSeqNum));</span>
+                }
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">                if (!moveToIndexInternal(index() - 1)) {</span>
+//                    Jvm.optionalSafepoint();
+<span class="nc" id="L470">                    return false;</span>
+                }
+<span class="nc" id="L472">            } catch (Exception e) {</span>
+                // can happen if index goes negative
+//                Jvm.optionalSafepoint();
+<span class="nc" id="L475">                return false;</span>
+<span class="fc" id="L476">            }</span>
+        }
+//        Jvm.optionalSafepoint();
+<span class="fc" id="L479">        return true;</span>
+    }
+
+    private void inACycleFound(@NotNull final Bytes&lt;?&gt; bytes) {
+<span class="fc" id="L483">        context.closeReadLimit(bytes.capacity());</span>
+<span class="fc" id="L484">        privateWire().readAndSetLength(bytes.readPosition());</span>
+<span class="fc" id="L485">        final long end = bytes.readLimit();</span>
+<span class="fc" id="L486">        context.closeReadPosition(end);</span>
+//        Jvm.optionalSafepoint();
+<span class="fc" id="L488">    }</span>
+
+    private long nextIndexWithNextAvailableCycle(final int cycle) {
+<span class="pc bpc" id="L491" title="2 of 4 branches missed.">        assert cycle != Integer.MIN_VALUE : &quot;cycle == Integer.MIN_VALUE&quot;;</span>
+
+<span class="pc bpc" id="L493" title="2 of 4 branches missed.">        if (cycle &gt; queue.lastCycle() || direction == TailerDirection.NONE) {</span>
+<span class="nc" id="L494">            return Long.MIN_VALUE;</span>
+        }
+
+        long nextIndex;
+<span class="fc" id="L498">        final int nextCycle = cycle + direction.add();</span>
+<span class="fc" id="L499">        final boolean found = cycle(nextCycle);</span>
+<span class="fc bfc" id="L500" title="All 2 branches covered.">        if (found)</span>
+<span class="fc" id="L501">            nextIndex = nextIndexWithinFoundCycle(nextCycle);</span>
+        else
+            try {
+<span class="fc" id="L504">                final int nextCycle0 = queue.nextCycle(this.cycle, direction);</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">                if (nextCycle0 == -1)</span>
+<span class="fc" id="L506">                    return Long.MIN_VALUE;</span>
+
+<span class="fc" id="L508">                nextIndex = nextIndexWithinFoundCycle(nextCycle0);</span>
+
+<span class="nc" id="L510">            } catch (ParseException e) {</span>
+<span class="nc" id="L511">                throw new IllegalStateException(e);</span>
+<span class="fc" id="L512">            }</span>
+
+<span class="pc bpc" id="L514" title="1 of 2 branches missed.">        if (Jvm.isResourceTracing()) {</span>
+<span class="fc" id="L515">            final int nextIndexCycle = queue.rollCycle().toCycle(nextIndex);</span>
+<span class="pc bpc" id="L516" title="1 of 4 branches missed.">            if (nextIndex != Long.MIN_VALUE &amp;&amp; nextIndexCycle - 1 != cycle) {</span>
+
+                /*
+                 * lets say that you were using a roll cycle of TEST_SECONDLY
+                 * and you wrote a message to the queue, if you created a tailer and read the first message,
+                 * then waited around 22 seconds before writing the next message, when the tailer
+                 * came to read the next message, there would be a gap of 22 cycle files
+                 * that did not exist, that is what this is reporting. If you are using daily rolling,
+                 * and writing every day, you should not see this message.
+                 */
+
+<span class="fc" id="L527">                Jvm.debug().on(getClass(), &quot;Rolled &quot; + (nextIndexCycle - cycle) + &quot; &quot; + &quot;times to find the &quot; +</span>
+                        &quot;next cycle file. This can occur if your appenders have not written &quot; +
+                        &quot;anything for a while, leaving the cycle files with a gap.&quot;);
+            }
+        }
+
+<span class="fc" id="L533">        return nextIndex;</span>
+    }
+
+    private long nextIndexWithinFoundCycle(final int nextCycle) {
+<span class="fc" id="L537">        state = FOUND_IN_CYCLE;</span>
+<span class="pc bpc" id="L538" title="1 of 2 branches missed.">        if (direction == FORWARD)</span>
+<span class="fc" id="L539">            return queue.rollCycle().toIndex(nextCycle, 0);</span>
+
+<span class="nc bnc" id="L541" title="All 2 branches missed.">        if (direction == BACKWARD) {</span>
+            try {
+<span class="nc" id="L543">                long lastSequenceNumber0 = store().lastSequenceNumber(this);</span>
+<span class="nc" id="L544">                return queue.rollCycle().toIndex(nextCycle, lastSequenceNumber0);</span>
+
+<span class="nc" id="L546">            } catch (Exception e) {</span>
+<span class="nc" id="L547">                throw new AssertionError(e);</span>
+            }
+        } else {
+<span class="nc" id="L550">            throw new IllegalStateException(&quot;direction=&quot; + direction);</span>
+        }
+    }
+
+    /**
+     * @return provides an index that includes the cycle number
+     */
+    @Override
+    public long index() {
+<span class="fc bfc" id="L559" title="All 2 branches covered.">        return indexValue == null ? this.index : indexValue.getValue();</span>
+    }
+
+    @Override
+    public int cycle() {
+<span class="fc" id="L564">        return this.cycle;</span>
+    }
+
+    @Override
+    public boolean moveToIndex(final long index) {
+<span class="fc" id="L569">        throwExceptionIfClosed();</span>
+
+<span class="fc bfc" id="L571" title="All 2 branches covered.">        if (moveToState.canReuseLastIndexMove(index, state, direction, queue, privateWire())) {</span>
+<span class="fc" id="L572">            return setAddress(true);</span>
+<span class="fc bfc" id="L573" title="All 2 branches covered.">        } else if (moveToState.indexIsCloseToAndAheadOfLastIndexMove(index, state, direction, queue)) {</span>
+<span class="fc" id="L574">            final long knownIndex = moveToState.lastMovedToIndex;</span>
+<span class="fc" id="L575">            final boolean found =</span>
+<span class="fc bfc" id="L576" title="All 2 branches covered.">                    this.store.linearScanTo(index, knownIndex, this,</span>
+<span class="fc" id="L577">                            moveToState.readPositionAtLastMove) == ScanResult.FOUND;</span>
+<span class="fc bfc" id="L578" title="All 2 branches covered.">            if (found) {</span>
+<span class="fc" id="L579">                index(index);</span>
+<span class="fc" id="L580">                moveToState.onSuccessfulScan(index, direction, privateWire().bytes().readPosition());</span>
+            }
+<span class="fc" id="L582">            return setAddress(found);</span>
+        }
+
+<span class="fc" id="L585">        return moveToIndexInternal(index);</span>
+    }
+
+    private boolean setAddress(final boolean found) {
+<span class="fc" id="L589">        final Wire wire = privateWire();</span>
+<span class="fc bfc" id="L590" title="All 2 branches covered.">        if (wire == null) {</span>
+<span class="fc" id="L591">            address = NO_PAGE;</span>
+<span class="fc" id="L592">            return false;</span>
+        }
+<span class="fc" id="L594">        final Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="fc bfc" id="L595" title="All 2 branches covered.">        address = found ? bytes.addressForRead(bytes.readPosition(), 4) : NO_PAGE;</span>
+<span class="fc" id="L596">        return found;</span>
+    }
+
+    private ScanResult moveToIndexResult0(final long index) {
+
+<span class="fc" id="L601">        final int cycle = queue.rollCycle().toCycle(index);</span>
+<span class="fc" id="L602">        final long sequenceNumber = queue.rollCycle().toSequenceNumber(index);</span>
+//        if (Jvm.isResourceTracing()) {
+//            Jvm.debug().on(getClass(), &quot;moveToIndex: &quot; + Long.toHexString(cycle) + &quot; &quot; + Long.toHexString(sequenceNumber));
+//        }
+
+        // moves to the expected cycle
+<span class="fc bfc" id="L608" title="All 2 branches covered.">        if (!cycle(cycle))</span>
+<span class="fc" id="L609">            return ScanResult.NOT_REACHED;</span>
+
+<span class="fc" id="L611">        index(index);</span>
+<span class="fc" id="L612">        final ScanResult scanResult = this.store().moveToIndexForRead(this, sequenceNumber);</span>
+<span class="fc" id="L613">        final Bytes&lt;?&gt; bytes = privateWire().bytes();</span>
+<span class="pc bpc" id="L614" title="2 of 5 branches missed.">        switch (scanResult) {</span>
+            case FOUND:
+<span class="fc" id="L616">                state = FOUND_IN_CYCLE;</span>
+<span class="fc" id="L617">                moveToState.onSuccessfulLookup(index, direction, bytes.readPosition());</span>
+<span class="fc" id="L618">                break;</span>
+
+            case NOT_REACHED:
+<span class="fc" id="L621">                state = NOT_REACHED_IN_CYCLE;</span>
+<span class="fc" id="L622">                break;</span>
+            case NOT_FOUND:
+<span class="fc bfc" id="L624" title="All 2 branches covered.">                if (this.cycle &lt; this.queue.lastCycle) {</span>
+<span class="fc" id="L625">                    state = END_OF_CYCLE;</span>
+<span class="fc" id="L626">                    return END_OF_FILE;</span>
+                }
+                break;
+            case END_OF_FILE:
+<span class="nc" id="L630">                state = END_OF_CYCLE;</span>
+                break;
+        }
+
+<span class="fc" id="L634">        return scanResult;</span>
+    }
+
+    ScanResult moveToIndexResult(final long index) {
+<span class="fc" id="L638">        final ScanResult scanResult = moveToIndexResult0(index);</span>
+<span class="fc bfc" id="L639" title="All 2 branches covered.">        setAddress(scanResult == FOUND);</span>
+<span class="fc" id="L640">        return scanResult;</span>
+    }
+
+    @NotNull
+    @Override
+    public final ExcerptTailer toStart() {
+<span class="pc bpc" id="L646" title="2 of 4 branches missed.">        assert direction != BACKWARD;</span>
+<span class="fc" id="L647">        final int firstCycle = queue.firstCycle();</span>
+<span class="fc bfc" id="L648" title="All 2 branches covered.">        if (firstCycle == Integer.MAX_VALUE) {</span>
+<span class="fc" id="L649">            state = UNINITIALISED;</span>
+<span class="fc" id="L650">            address = NO_PAGE;</span>
+<span class="fc" id="L651">            return this;</span>
+        }
+<span class="fc bfc" id="L653" title="All 2 branches covered.">        if (firstCycle != this.cycle) {</span>
+            // moves to the expected cycle
+<span class="fc" id="L655">            final boolean found = cycle(firstCycle);</span>
+<span class="pc bpc" id="L656" title="4 of 6 branches missed.">            assert found || store == null;</span>
+<span class="pc bpc" id="L657" title="1 of 2 branches missed.">            if (found)</span>
+<span class="fc" id="L658">                state = FOUND_IN_CYCLE;</span>
+        }
+<span class="fc" id="L660">        index(queue.rollCycle().toIndex(cycle, 0));</span>
+
+<span class="fc" id="L662">        state = FOUND_IN_CYCLE;</span>
+<span class="fc" id="L663">        Wire wire = privateWire();</span>
+<span class="pc bpc" id="L664" title="1 of 2 branches missed.">        if (wire != null) {</span>
+<span class="fc" id="L665">            wire.bytes().readPosition(0);</span>
+<span class="fc" id="L666">            address = wire.bytes().addressForRead(0);</span>
+        }
+<span class="fc" id="L668">        return this;</span>
+    }
+
+    private boolean moveToIndexInternal(final long index) {
+<span class="fc" id="L672">        moveToState.indexMoveCount++;</span>
+//        Jvm.optionalSafepoint();
+<span class="fc" id="L674">        final ScanResult scanResult = moveToIndexResult0(index);</span>
+<span class="fc bfc" id="L675" title="All 2 branches covered.">        setAddress(scanResult == FOUND);</span>
+<span class="fc bfc" id="L676" title="All 2 branches covered.">        return scanResult == FOUND;</span>
+    }
+
+    /**
+     * gives approximately the last index, can not be relied on as the last index may have changed just after this was called. For this reason, this
+     * code is not in queue as it should only be an internal method
+     *
+     * @return the last index at the time this method was called, or Long.MIN_VALUE if none.
+     */
+    private long approximateLastIndex() {
+
+<span class="fc" id="L687">        final RollCycle rollCycle = queue.rollCycle();</span>
+<span class="fc" id="L688">        final int lastCycle = queue.lastCycle();</span>
+        try {
+<span class="fc bfc" id="L690" title="All 2 branches covered.">            if (lastCycle == Integer.MIN_VALUE)</span>
+<span class="fc" id="L691">                return Long.MIN_VALUE;</span>
+
+<span class="fc" id="L693">            return approximateLastCycle2(lastCycle);</span>
+
+<span class="nc" id="L695">        } catch (@NotNull StreamCorruptedException | UnrecoverableTimeoutException e) {</span>
+<span class="nc" id="L696">            throw new IllegalStateException(e);</span>
+        }
+    }
+
+    private long approximateLastCycle2(int lastCycle) throws StreamCorruptedException {
+<span class="fc" id="L701">        RollCycle rollCycle = queue.rollCycle();</span>
+
+<span class="fc bfc" id="L703" title="All 2 branches covered.">        final SingleChronicleQueueStore wireStore = (cycle == lastCycle) ? this.store : queue.storeForCycle(</span>
+<span class="fc" id="L704">                lastCycle, queue.epoch(), false, this.store);</span>
+<span class="fc" id="L705">        this.setCycle(lastCycle);</span>
+<span class="fc bfc" id="L706" title="All 2 branches covered.">        if (wireStore == null)</span>
+<span class="fc" id="L707">            throw new IllegalStateException(&quot;Store not found for cycle &quot; + Long.toHexString(lastCycle) + &quot;. Probably the files were removed?&quot;);</span>
+
+<span class="fc bfc" id="L709" title="All 2 branches covered.">        if (this.store != wireStore) {</span>
+<span class="fc" id="L710">            releaseStore();</span>
+<span class="fc" id="L711">            this.store = wireStore;</span>
+<span class="fc" id="L712">            resetWires();</span>
+        }
+        // give the position of the last entry and
+        // flag we want to count it even though we don't know if it will be meta data or not.
+
+<span class="fc" id="L717">        final long sequenceNumber = this.store.lastSequenceNumber(this);</span>
+
+        // fixes #378
+<span class="fc bfc" id="L720" title="All 2 branches covered.">        if (sequenceNumber == -1L) {</span>
+            // nothing has been written yet, so point to start of cycle
+<span class="fc" id="L722">            long prevCycle = queue.firstCycle;</span>
+<span class="fc bfc" id="L723" title="All 2 branches covered.">            while (prevCycle &lt; lastCycle) {</span>
+<span class="fc" id="L724">                lastCycle--;</span>
+                try {
+<span class="fc" id="L726">                    return approximateLastCycle2(lastCycle);</span>
+<span class="fc" id="L727">                } catch (IllegalStateException e) {</span>
+                    // try again.
+<span class="fc" id="L729">                }</span>
+            }
+<span class="fc" id="L731">            return rollCycle.toIndex(lastCycle, 0L);</span>
+        }
+<span class="fc" id="L733">        return rollCycle.toIndex(lastCycle, sequenceNumber);</span>
+    }
+
+    private boolean headerNumberCheck(@NotNull final AbstractWire wire) {
+
+<span class="fc" id="L738">        wire.headNumberCheck((actual, position) -&gt; {</span>
+            try {
+<span class="nc" id="L740">                final long expecting = store.sequenceForPosition(this, position, false);</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">                if (actual == expecting)</span>
+<span class="nc" id="L742">                    return true;</span>
+<span class="nc" id="L743">                Jvm.warn().on(getClass(), new AssertionError(&quot;header number check failed &quot; +</span>
+                        &quot;expecting=&quot; + expecting +
+                        &quot;  !=  actual=&quot; + actual));
+
+<span class="nc" id="L747">                return false;</span>
+<span class="nc" id="L748">            } catch (Exception e) {</span>
+<span class="nc" id="L749">                Jvm.warn().on(getClass(), &quot;&quot;, e);</span>
+<span class="nc" id="L750">                return false;</span>
+            }
+        });
+
+<span class="fc" id="L754">        return true;</span>
+    }
+
+    private void resetWires() {
+<span class="fc" id="L758">        final WireType wireType = queue.wireType();</span>
+
+<span class="fc" id="L760">        final AbstractWire wire = (AbstractWire) readAnywhere(wireType.apply(store.bytes()));</span>
+<span class="pc bpc" id="L761" title="2 of 6 branches missed.">        assert !QueueSystemProperties.CHECK_INDEX || headerNumberCheck(wire);</span>
+<span class="fc" id="L762">        this.context.wire(wire);</span>
+<span class="fc" id="L763">        wire.parent(this);</span>
+
+<span class="fc" id="L765">        final Wire wireForIndexOld = wireForIndex;</span>
+<span class="fc" id="L766">        wireForIndex = readAnywhere(wireType.apply(store().bytes()));</span>
+<span class="pc bpc" id="L767" title="2 of 6 branches missed.">        assert !QueueSystemProperties.CHECK_INDEX || headerNumberCheck((AbstractWire) wireForIndex);</span>
+<span class="pc bpc" id="L768" title="2 of 4 branches missed.">        assert wire != wireForIndexOld;</span>
+
+<span class="fc bfc" id="L770" title="All 2 branches covered.">        if (wireForIndexOld != null)</span>
+<span class="fc" id="L771">            wireForIndexOld.bytes().releaseLast();</span>
+<span class="fc" id="L772">    }</span>
+
+    @NotNull
+    private Wire readAnywhere(@NotNull final Wire wire) {
+<span class="fc" id="L776">        final Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="fc" id="L777">        bytes.readLimitToCapacity();</span>
+<span class="fc bfc" id="L778" title="All 2 branches covered.">        if (store.dataVersion() &gt; 0)</span>
+<span class="fc" id="L779">            wire.usePadding(true);</span>
+<span class="fc" id="L780">        return wire;</span>
+    }
+
+    @NotNull
+    @Override
+    public ExcerptTailer toEnd() {
+<span class="fc" id="L786">        throwExceptionIfClosed();</span>
+
+<span class="fc bfc" id="L788" title="All 2 branches covered.">        if (direction.equals(TailerDirection.BACKWARD)) {</span>
+            try {
+<span class="fc" id="L790">                return originalToEnd();</span>
+<span class="nc" id="L791">            } catch (NotReachedException e) {</span>
+                // due to a race condition, where the queue rolls as we are processing toEnd()
+                // we may get a NotReachedException  ( see https://github.com/OpenHFT/Chronicle-Queue/issues/702 )
+                // hence are are just going to retry.
+<span class="nc" id="L795">                return originalToEnd();</span>
+            }
+        }
+
+<span class="fc" id="L799">        return optimizedToEnd();</span>
+    }
+
+    @Override
+    public ExcerptTailer striding(final boolean striding) {
+<span class="fc" id="L804">        throwExceptionIfClosedInSetter();</span>
+
+<span class="fc" id="L806">        this.striding = striding;</span>
+<span class="fc" id="L807">        return this;</span>
+    }
+
+    @Override
+    public boolean striding() {
+<span class="nc" id="L812">        return striding;</span>
+    }
+
+    @NotNull
+    private ExcerptTailer optimizedToEnd() {
+<span class="fc" id="L817">        final RollCycle rollCycle = queue.rollCycle();</span>
+<span class="fc" id="L818">        final int lastCycle = queue.lastCycle();</span>
+        try {
+<span class="fc bfc" id="L820" title="All 2 branches covered.">            if (lastCycle == Integer.MIN_VALUE) {</span>
+<span class="pc bpc" id="L821" title="1 of 2 branches missed.">                if (state() == TailerState.CYCLE_NOT_FOUND)</span>
+<span class="nc" id="L822">                    state = UNINITIALISED;</span>
+<span class="pc bpc" id="L823" title="1 of 2 branches missed.">                setAddress(state == FOUND_IN_CYCLE);</span>
+<span class="fc" id="L824">                return this;</span>
+            }
+
+<span class="fc" id="L827">            final SingleChronicleQueueStore wireStore = queue.storeForCycle(</span>
+<span class="fc" id="L828">                    lastCycle, queue.epoch(), false, this.store);</span>
+<span class="fc" id="L829">            this.setCycle(lastCycle);</span>
+<span class="pc bpc" id="L830" title="1 of 2 branches missed.">            if (wireStore == null)</span>
+<span class="nc" id="L831">                throw new IllegalStateException(&quot;Store not found for cycle &quot; + Long.toHexString(lastCycle) + &quot;. Probably the files were removed? lastCycle=&quot; + lastCycle);</span>
+
+<span class="pc bpc" id="L833" title="1 of 2 branches missed.">            if (this.store != wireStore) {</span>
+<span class="fc" id="L834">                releaseStore();</span>
+<span class="fc" id="L835">                this.store = wireStore;</span>
+<span class="fc" id="L836">                resetWires();</span>
+            }
+            // give the position of the last entry and
+            // flag we want to count it even though we don't know if it will be meta data or not.
+
+<span class="fc" id="L841">            final long sequenceNumber = store.moveToEndForRead(privateWire());</span>
+
+            // fixes #378
+<span class="fc bfc" id="L844" title="All 2 branches covered.">            if (sequenceNumber == -1L) {</span>
+                // nothing has been written yet, so point to start of cycle
+                try {
+<span class="fc" id="L847">                    return originalToEnd();</span>
+<span class="nc" id="L848">                } catch (NotReachedException e) {</span>
+                    // due to a race condition, where the queue rolls as we are processing toEnd()
+                    // we may get a NotReachedException hence are are just going to retry.
+<span class="nc" id="L851">                    return originalToEnd();</span>
+                }
+            }
+
+<span class="fc" id="L855">            final Bytes&lt;?&gt; bytes = privateWire().bytes();</span>
+<span class="pc bpc" id="L856" title="1 of 2 branches missed.">            state = isEndOfFile(bytes.readVolatileInt(bytes.readPosition())) ? END_OF_CYCLE : FOUND_IN_CYCLE;</span>
+
+<span class="fc" id="L858">            index(rollCycle.toIndex(lastCycle, sequenceNumber));</span>
+
+<span class="pc bpc" id="L860" title="1 of 2 branches missed.">            setAddress(state == FOUND_IN_CYCLE);</span>
+<span class="nc" id="L861">        } catch (@NotNull UnrecoverableTimeoutException e) {</span>
+<span class="nc" id="L862">            throw new IllegalStateException(e);</span>
+<span class="fc" id="L863">        }</span>
+
+<span class="fc" id="L865">        return this;</span>
+    }
+
+    @NotNull
+
+    public ExcerptTailer originalToEnd() {
+<span class="fc" id="L871">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L873">        long index = approximateLastIndex();</span>
+
+<span class="fc bfc" id="L875" title="All 2 branches covered.">        if (index == Long.MIN_VALUE) {</span>
+<span class="pc bpc" id="L876" title="1 of 2 branches missed.">            if (state() == TailerState.CYCLE_NOT_FOUND)</span>
+<span class="nc" id="L877">                state = UNINITIALISED;</span>
+<span class="fc" id="L878">            return this;</span>
+        }
+<span class="fc" id="L880">        ScanResult scanResult = moveToIndexResult(index);</span>
+<span class="pc bpc" id="L881" title="3 of 5 branches missed.">        switch (scanResult) {</span>
+            case NOT_FOUND:
+<span class="pc bpc" id="L883" title="1 of 2 branches missed.">                if (moveToIndexResult(index - 1) == FOUND)</span>
+<span class="nc" id="L884">                    state = FOUND_IN_CYCLE;</span>
+                break;
+
+            case FOUND:
+<span class="pc bpc" id="L888" title="1 of 2 branches missed.">                if (direction == FORWARD) {</span>
+<span class="nc" id="L889">                    final ScanResult result = moveToIndexResult(++index);</span>
+<span class="nc bnc" id="L890" title="All 4 branches missed.">                    switch (result) {</span>
+                        case NOT_REACHED:
+<span class="nc" id="L892">                            throw new NotReachedException(&quot;NOT_REACHED after FOUND&quot;);</span>
+                        case FOUND:
+                            // the end moved!!
+                        case NOT_FOUND:
+<span class="nc" id="L896">                            state = FOUND_IN_CYCLE;</span>
+<span class="nc" id="L897">                            break;</span>
+                        case END_OF_FILE:
+<span class="nc" id="L899">                            state = END_OF_CYCLE;</span>
+<span class="nc" id="L900">                            break;</span>
+                        default:
+<span class="nc" id="L902">                            throw new IllegalStateException(&quot;Unknown ScanResult: &quot; + result);</span>
+                    }
+<span class="nc" id="L904">                }</span>
+                break;
+            case NOT_REACHED:
+<span class="nc" id="L907">                throw new NotReachedException(&quot;NOT_REACHED index: &quot; + Long.toHexString(index));</span>
+            case END_OF_FILE:
+<span class="nc" id="L909">                state = END_OF_CYCLE;</span>
+<span class="nc" id="L910">                break;</span>
+            default:
+<span class="nc" id="L912">                throw new IllegalStateException(&quot;Unknown ScanResult: &quot; + scanResult);</span>
+        }
+
+<span class="fc" id="L915">        return this;</span>
+
+    }
+
+    @Override
+    public TailerDirection direction() {
+<span class="fc" id="L921">        return direction;</span>
+    }
+
+    @NotNull
+    @Override
+    public ExcerptTailer direction(@NotNull final TailerDirection direction) {
+<span class="fc" id="L927">        throwExceptionIfClosedInSetter();</span>
+
+<span class="fc" id="L929">        final TailerDirection oldDirection = this.direction();</span>
+<span class="fc" id="L930">        this.direction = direction;</span>
+<span class="pc bpc" id="L931" title="1 of 4 branches missed.">        if (oldDirection == TailerDirection.BACKWARD &amp;&amp;</span>
+                direction == TailerDirection.FORWARD) {
+<span class="fc" id="L933">            moveToIndexInternal(index());</span>
+        }
+
+<span class="fc" id="L936">        return this;</span>
+    }
+
+    @Override
+    @NotNull
+    public ChronicleQueue queue() {
+<span class="nc" id="L942">        return queue;</span>
+    }
+
+    @PackageLocal
+    void incrementIndex() {
+<span class="fc" id="L947">        final RollCycle rollCycle = queue.rollCycle();</span>
+<span class="fc" id="L948">        final long index = this.index();</span>
+<span class="fc" id="L949">        long seq = rollCycle.toSequenceNumber(index);</span>
+<span class="fc" id="L950">        final int cycle = rollCycle.toCycle(index);</span>
+
+<span class="fc" id="L952">        seq += direction.add();</span>
+<span class="pc bpc" id="L953" title="1 of 4 branches missed.">        switch (direction) {</span>
+            case NONE:
+<span class="fc" id="L955">                break;</span>
+            case FORWARD:
+                // if it runs out of seq number it will flow over to tomorrows cycle file
+<span class="pc bpc" id="L958" title="1 of 2 branches missed.">                if (rollCycle.toSequenceNumber(seq) &lt; seq) {</span>
+<span class="nc" id="L959">                    cycle(cycle + 1);</span>
+<span class="nc" id="L960">                    Jvm.warn().on(getClass(),</span>
+                            &quot;we have run out of sequence numbers, so will start to write to &quot; +
+                                    &quot;the next .cq4 file, the new cycle=&quot; + cycle);
+<span class="nc" id="L963">                    seq = 0;</span>
+                }
+                break;
+            case BACKWARD:
+<span class="fc bfc" id="L967" title="All 2 branches covered.">                if (seq &lt; 0) {</span>
+<span class="fc" id="L968">                    windBackCycle(cycle);</span>
+<span class="fc" id="L969">                    return;</span>
+<span class="fc bfc" id="L970" title="All 4 branches covered.">                } else if (seq &gt; 0 &amp;&amp; striding) {</span>
+<span class="fc" id="L971">                    seq -= seq % rollCycle.defaultIndexSpacing();</span>
+                }
+                break;
+        }
+<span class="fc" id="L975">        index0(rollCycle.toIndex(cycle, seq));</span>
+
+<span class="fc" id="L977">    }</span>
+
+    private void windBackCycle(int cycle) {
+<span class="fc" id="L980">        final long first = queue.firstCycle();</span>
+<span class="fc bfc" id="L981" title="All 2 branches covered.">        while (--cycle &gt;= first)</span>
+<span class="fc bfc" id="L982" title="All 2 branches covered.">            if (tryWindBack(cycle))</span>
+<span class="fc" id="L983">                return;</span>
+
+<span class="fc" id="L985">        this.index(queue.rollCycle().toIndex(cycle, -1));</span>
+<span class="fc" id="L986">        this.state = BEYOND_START_OF_CYCLE;</span>
+<span class="fc" id="L987">    }</span>
+
+    private boolean tryWindBack(final int cycle) {
+<span class="fc" id="L990">        final long count = queue.exceptsPerCycle(cycle);</span>
+<span class="fc bfc" id="L991" title="All 2 branches covered.">        if (count &lt;= 0)</span>
+<span class="fc" id="L992">            return false;</span>
+<span class="fc" id="L993">        final RollCycle rollCycle = queue.rollCycle();</span>
+<span class="fc" id="L994">        moveToIndexInternal(rollCycle.toIndex(cycle, count - 1));</span>
+<span class="fc" id="L995">        this.state = FOUND_IN_CYCLE;</span>
+<span class="fc" id="L996">        return true;</span>
+    }
+
+    void index0(final long index) {
+<span class="fc bfc" id="L1000" title="All 2 branches covered.">        if (indexValue == null)</span>
+<span class="fc" id="L1001">            this.index = index;</span>
+        else
+<span class="fc" id="L1003">            indexValue.setValue(index);</span>
+<span class="fc" id="L1004">    }</span>
+
+    // DON'T INLINE THIS METHOD, as it's used by enterprise chronicle queue
+    void index(final long index) {
+<span class="fc" id="L1008">        index0(index);</span>
+
+<span class="fc bfc" id="L1010" title="All 2 branches covered.">        if (indexAtCreation == Long.MIN_VALUE) {</span>
+<span class="fc" id="L1011">            indexAtCreation = index;</span>
+        }
+
+<span class="fc" id="L1014">        moveToState.reset();</span>
+<span class="fc" id="L1015">    }</span>
+
+    private boolean cycle(final int cycle) {
+<span class="fc bfc" id="L1018" title="All 6 branches covered.">        if (this.cycle == cycle &amp;&amp; (state == FOUND_IN_CYCLE || state == NOT_REACHED_IN_CYCLE))</span>
+<span class="fc" id="L1019">            return true;</span>
+
+<span class="fc" id="L1021">        final SingleChronicleQueueStore nextStore = queue.storeForCycle(</span>
+<span class="fc" id="L1022">                cycle, queue.epoch(), false, this.store);</span>
+
+<span class="fc bfc" id="L1024" title="All 4 branches covered.">        if (nextStore == null &amp;&amp; store == null)</span>
+<span class="fc" id="L1025">            return false;</span>
+
+<span class="fc bfc" id="L1027" title="All 2 branches covered.">        if (nextStore == null) {</span>
+<span class="fc bfc" id="L1028" title="All 2 branches covered.">            if (direction == BACKWARD)</span>
+<span class="fc" id="L1029">                state = BEYOND_START_OF_CYCLE;</span>
+            else
+<span class="fc" id="L1031">                state = CYCLE_NOT_FOUND;</span>
+<span class="fc" id="L1032">            return false;</span>
+        }
+
+<span class="pc bpc" id="L1035" title="1 of 2 branches missed.">        if (nextStore == store) {</span>
+<span class="nc" id="L1036">            return true;</span>
+        }
+
+<span class="fc" id="L1039">        releaseStore();</span>
+
+<span class="fc" id="L1041">        context.wire(null);</span>
+<span class="fc" id="L1042">        store = nextStore;</span>
+<span class="fc" id="L1043">        state = FOUND_IN_CYCLE;</span>
+<span class="fc" id="L1044">        setCycle(cycle);</span>
+<span class="fc" id="L1045">        resetWires();</span>
+<span class="fc" id="L1046">        final Wire wire = privateWire();</span>
+<span class="fc" id="L1047">        wire.parent(this);</span>
+<span class="fc" id="L1048">        wire.pauser(queue.pauserSupplier.get());</span>
+<span class="fc" id="L1049">        return true;</span>
+    }
+
+    void releaseStore() {
+<span class="fc bfc" id="L1053" title="All 2 branches covered.">        if (store != null) {</span>
+<span class="fc" id="L1054">            storePool.closeStore(store);</span>
+<span class="fc" id="L1055">            store = null;</span>
+        }
+<span class="fc" id="L1057">        state = UNINITIALISED;</span>
+<span class="fc" id="L1058">    }</span>
+
+    @Override
+    public void readAfterReplicaAcknowledged(final boolean readAfterReplicaAcknowledged) {
+<span class="fc" id="L1062">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L1064">        this.readAfterReplicaAcknowledged = readAfterReplicaAcknowledged;</span>
+<span class="fc" id="L1065">    }</span>
+
+    @Override
+    public boolean readAfterReplicaAcknowledged() {
+<span class="nc" id="L1069">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L1071">        return readAfterReplicaAcknowledged;</span>
+    }
+
+    @NotNull
+    @Override
+    public TailerState state() {
+<span class="fc" id="L1077">        return state;</span>
+    }
+
+    @NotNull
+    @Override
+    public ExcerptTailer afterLastWritten(@NotNull final ChronicleQueue queue) {
+<span class="fc" id="L1083">        throwExceptionIfClosed();</span>
+
+<span class="fc bfc" id="L1085" title="All 2 branches covered.">        if (queue == this.queue)</span>
+<span class="fc" id="L1086">            throw new IllegalArgumentException(&quot;You must pass the queue written to, not the queue read&quot;);</span>
+<span class="fc" id="L1087">        try (@NotNull final ExcerptTailer tailer = queue.createTailer()</span>
+<span class="fc" id="L1088">                .direction(BACKWARD)</span>
+<span class="fc" id="L1089">                .toEnd()) {</span>
+
+<span class="fc" id="L1091">            @NotNull final VanillaMessageHistory messageHistory = new VanillaMessageHistory();</span>
+
+            while (true) {
+<span class="fc" id="L1094">                try (DocumentContext context = tailer.readingDocument()) {</span>
+<span class="fc bfc" id="L1095" title="All 2 branches covered.">                    if (!context.isPresent()) {</span>
+<span class="fc" id="L1096">                        toStart();</span>
+<span class="fc" id="L1097">                        return this;</span>
+                    }
+
+<span class="fc" id="L1100">                    final MessageHistory veh = SCQTools.readHistory(context, messageHistory);</span>
+<span class="fc bfc" id="L1101" title="All 2 branches covered.">                    if (veh == null)</span>
+                        continue;
+
+<span class="fc" id="L1104">                    int i = veh.sources() - 1;</span>
+<span class="pc bpc" id="L1105" title="1 of 2 branches missed.">                    if (i &lt; 0)</span>
+                        continue;
+<span class="pc bpc" id="L1107" title="1 of 2 branches missed.">                    if (veh.sourceId(i) != this.sourceId())</span>
+                        continue;
+
+<span class="fc" id="L1110">                    final long sourceIndex = veh.sourceIndex(i);</span>
+<span class="pc bpc" id="L1111" title="1 of 2 branches missed.">                    if (!moveToIndexInternal(sourceIndex)) {</span>
+<span class="nc" id="L1112">                        final String errorMessage = String.format(</span>
+                                &quot;Unable to move to sourceIndex %s in queue %s&quot;,
+<span class="nc" id="L1114">                                Long.toHexString(sourceIndex), this.queue.fileAbsolutePath());</span>
+<span class="nc" id="L1115">                        throw new IORuntimeException(errorMessage + extraInfo(tailer, messageHistory));</span>
+                    }
+<span class="fc" id="L1117">                    try (DocumentContext content = readingDocument()) {</span>
+<span class="pc bpc" id="L1118" title="1 of 2 branches missed.">                        if (!content.isPresent()) {</span>
+<span class="nc" id="L1119">                            final String errorMessage = String.format(</span>
+                                    &quot;No readable document found at sourceIndex %s in queue %s&quot;,
+<span class="nc" id="L1121">                                    Long.toHexString(sourceIndex + 1), this.queue.fileAbsolutePath());</span>
+<span class="nc" id="L1122">                            throw new IORuntimeException(errorMessage + extraInfo(tailer, messageHistory));</span>
+                        }
+                        // skip this message and go to the next.
+                    }
+<span class="fc" id="L1126">                    return this;</span>
+                }
+            }
+        }
+    }
+
+    private String extraInfo(@NotNull final ExcerptTailer tailer, @NotNull final VanillaMessageHistory messageHistory) {
+<span class="nc" id="L1133">        return String.format(</span>
+                &quot;. That sourceIndex was determined fom the last entry written to queue %s &quot; +
+                        &quot;(message index %s, message history %s). If source queue is replicated then &quot; +
+                        &quot;sourceIndex may not have been replicated yet&quot;,
+<span class="nc" id="L1137">                tailer.queue().fileAbsolutePath(), Long.toHexString(tailer.index()), WireType.TEXT.asString(messageHistory));</span>
+    }
+
+    public void setCycle(final int cycle) {
+<span class="fc" id="L1141">        throwExceptionIfClosedInSetter();</span>
+
+<span class="fc" id="L1143">        this.cycle = cycle;</span>
+<span class="fc" id="L1144">    }</span>
+
+    // visible for testing
+    int getIndexMoveCount() {
+<span class="fc" id="L1148">        return moveToState.indexMoveCount;</span>
+    }
+
+    @Deprecated // Should not be providing accessors to reference-counted objects
+    @NotNull
+    WireStore store() {
+<span class="pc bpc" id="L1154" title="1 of 2 branches missed.">        if (store == null)</span>
+<span class="nc" id="L1155">            setCycle(cycle());</span>
+<span class="fc" id="L1156">        return store;</span>
+    }
+
+<span class="fc" id="L1159">    private static final class MoveToState {</span>
+<span class="fc" id="L1160">        private long lastMovedToIndex = Long.MIN_VALUE;</span>
+<span class="fc" id="L1161">        private TailerDirection directionAtLastMoveTo = TailerDirection.NONE;</span>
+<span class="fc" id="L1162">        private long readPositionAtLastMove = Long.MIN_VALUE;</span>
+<span class="fc" id="L1163">        private int indexMoveCount = 0;</span>
+
+        void onSuccessfulLookup(final long movedToIndex,
+                                final TailerDirection direction,
+                                final long readPosition) {
+<span class="fc" id="L1168">            this.lastMovedToIndex = movedToIndex;</span>
+<span class="fc" id="L1169">            this.directionAtLastMoveTo = direction;</span>
+<span class="fc" id="L1170">            this.readPositionAtLastMove = readPosition;</span>
+<span class="fc" id="L1171">        }</span>
+
+        void onSuccessfulScan(final long movedToIndex,
+                              final TailerDirection direction,
+                              final long readPosition) {
+<span class="fc" id="L1176">            this.lastMovedToIndex = movedToIndex;</span>
+<span class="fc" id="L1177">            this.directionAtLastMoveTo = direction;</span>
+<span class="fc" id="L1178">            this.readPositionAtLastMove = readPosition;</span>
+<span class="fc" id="L1179">        }</span>
+
+        void reset() {
+<span class="fc" id="L1182">            lastMovedToIndex = Long.MIN_VALUE;</span>
+<span class="fc" id="L1183">            directionAtLastMoveTo = TailerDirection.NONE;</span>
+<span class="fc" id="L1184">            readPositionAtLastMove = Long.MIN_VALUE;</span>
+<span class="fc" id="L1185">        }</span>
+
+        private boolean indexIsCloseToAndAheadOfLastIndexMove(final long index,
+                                                              final TailerState state,
+                                                              final TailerDirection direction,
+                                                              final ChronicleQueue queue) {
+<span class="pc bpc" id="L1191" title="1 of 8 branches missed.">            return lastMovedToIndex != Long.MIN_VALUE &amp;&amp;</span>
+                    index - lastMovedToIndex &lt; INDEXING_LINEAR_SCAN_THRESHOLD &amp;&amp;
+                    state == FOUND_IN_CYCLE &amp;&amp;
+                    direction == directionAtLastMoveTo &amp;&amp;
+<span class="fc bfc" id="L1195" title="All 4 branches covered.">                    queue.rollCycle().toCycle(index) == queue.rollCycle().toCycle(lastMovedToIndex) &amp;&amp;</span>
+                    index &gt; lastMovedToIndex;
+        }
+
+        private boolean canReuseLastIndexMove(final long index,
+                                              final TailerState state,
+                                              final TailerDirection direction,
+                                              final ChronicleQueue queue,
+                                              final Wire wire) {
+
+<span class="pc bpc" id="L1205" title="1 of 12 branches missed.">            return ((wire == null) || wire.bytes().readPosition() == readPositionAtLastMove) &amp;&amp;</span>
+                    index == this.lastMovedToIndex &amp;&amp; index != 0 &amp;&amp; state == FOUND_IN_CYCLE &amp;&amp;
+                    direction == directionAtLastMoveTo &amp;&amp;
+<span class="pc bpc" id="L1208" title="1 of 2 branches missed.">                    queue.rollCycle().toCycle(index) == queue.rollCycle().toCycle(lastMovedToIndex);</span>
+        }
+    }
+
+<span class="fc" id="L1212">    private class Finalizer {</span>
+        @Override
+        protected void finalize() throws Throwable {
+<span class="fc" id="L1215">            super.finalize();</span>
+<span class="fc" id="L1216">            warnAndCloseIfNotClosed();</span>
+<span class="fc" id="L1217">        }</span>
+    }
+
+    class StoreTailerContext extends BinaryReadDocumentContext {
+<span class="fc" id="L1221">        StoreTailerContext() {</span>
+<span class="fc" id="L1222">            super(null);</span>
+<span class="fc" id="L1223">        }</span>
+
+        @Override
+        public long index() {
+<span class="fc" id="L1227">            return StoreTailer.this.index();</span>
+        }
+
+        @Override
+        public int sourceId() {
+<span class="fc" id="L1232">            return StoreTailer.this.sourceId();</span>
+        }
+
+        @Override
+        public void close() {
+<span class="fc bfc" id="L1237" title="All 2 branches covered.">            if (rollbackIfNeeded())</span>
+<span class="fc" id="L1238">                return;</span>
+
+<span class="fc bfc" id="L1240" title="All 4 branches covered.">            if (isPresent() &amp;&amp; !isMetaData())</span>
+<span class="fc" id="L1241">                incrementIndex();</span>
+
+<span class="fc" id="L1243">            super.close();</span>
+<span class="fc bfc" id="L1244" title="All 2 branches covered.">            if (direction == FORWARD)</span>
+<span class="pc bpc" id="L1245" title="1 of 2 branches missed.">                setAddress(context.wire() != null);</span>
+<span class="fc bfc" id="L1246" title="All 2 branches covered.">            else if (direction == BACKWARD)</span>
+<span class="fc" id="L1247">                setAddress(false);</span>
+<span class="fc" id="L1248">        }</span>
+
+        boolean present(final boolean present) {
+<span class="fc" id="L1251">            return this.present = present;</span>
+        }
+
+        public void wire(@Nullable final AbstractWire wire) {
+<span class="fc bfc" id="L1255" title="All 2 branches covered.">            if (wire == this.wire)</span>
+<span class="fc" id="L1256">                return;</span>
+
+<span class="fc" id="L1258">            final AbstractWire oldWire = this.wire;</span>
+<span class="fc" id="L1259">            this.wire = wire;</span>
+
+<span class="fc bfc" id="L1261" title="All 2 branches covered.">            if (oldWire != null)</span>
+<span class="fc" id="L1262">                oldWire.bytes().release(INIT); // might be held elsewhere if used for another purpose.</span>
+<span class="fc" id="L1263">        }</span>
+
+        public void metaData(boolean metaData) {
+<span class="fc" id="L1266">            this.metaData = metaData;</span>
+<span class="fc" id="L1267">        }</span>
+    }
+
+    @Override
+    public File currentFile() {
+<span class="nc" id="L1272">        SingleChronicleQueueStore store = this.store;</span>
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">        return store == null ? null : store.currentFile();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

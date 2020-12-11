@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JDBCComponent.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue</a> &gt; <span class="el_source">JDBCComponent.java</span></div><h1>JDBCComponent.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *  you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package net.openhft.chronicle.queue;
+
+import net.openhft.chronicle.core.util.ThrowingSupplier;
+import org.jetbrains.annotations.NotNull;
+
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+@Deprecated /* For removal in x.22, use JdbcStatement.create() instead */
+public class JDBCComponent implements JDBCStatement {
+    @NotNull
+    private final Connection connection;
+    private final JDBCResult result;
+
+<span class="nc" id="L33">    public JDBCComponent(@NotNull ThrowingSupplier&lt;Connection, SQLException&gt; connectionSupplier, JDBCResult result) throws SQLException {</span>
+<span class="nc" id="L34">        connection = connectionSupplier.get();</span>
+<span class="nc" id="L35">        this.result = result;</span>
+<span class="nc" id="L36">    }</span>
+
+    @Override
+    public void executeUpdate(String query, @NotNull Object... args) {
+<span class="nc" id="L40">        try (PreparedStatement ps = connection.prepareStatement(query)) {</span>
+<span class="nc bnc" id="L41" title="All 2 branches missed.">            for (int i = 0; i &lt; args.length; i++)</span>
+<span class="nc" id="L42">                ps.setObject(i + 1, args[i]);</span>
+<span class="nc" id="L43">            int count = ps.executeUpdate();</span>
+            // record the count.
+<span class="nc" id="L45">            result.updateResult(count, query, args);</span>
+<span class="nc" id="L46">        } catch (Throwable t) {</span>
+<span class="nc" id="L47">            result.updateThrown(t, query, args);</span>
+<span class="nc" id="L48">        }</span>
+<span class="nc" id="L49">    }</span>
+
+    @Override
+    public void executeQuery(String query, @NotNull Object... args) {
+<span class="nc" id="L53">        try (PreparedStatement ps = connection.prepareStatement(query)) {</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">            for (int i = 0; i &lt; args.length; i++)</span>
+<span class="nc" id="L55">                ps.setObject(i + 1, args[i]);</span>
+<span class="nc" id="L56">            ResultSet resultSet = ps.executeQuery();</span>
+<span class="nc" id="L57">            ResultSetMetaData metaData = resultSet.getMetaData();</span>
+<span class="nc" id="L58">            int columnCount = metaData.getColumnCount();</span>
+<span class="nc" id="L59">            List&lt;String&gt; headings = new ArrayList&lt;&gt;(columnCount);</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">            for (int i = 1; i &lt;= columnCount; i++)</span>
+<span class="nc" id="L61">                headings.add(metaData.getColumnName(i));</span>
+
+<span class="nc" id="L63">            List&lt;List&lt;Object&gt;&gt; rows = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">            while (resultSet.next()) {</span>
+<span class="nc" id="L65">                List&lt;Object&gt; row = new ArrayList&lt;&gt;(columnCount);</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                for (int i = 1; i &lt;= columnCount; i++) {</span>
+<span class="nc" id="L67">                    row.add(resultSet.getObject(i));</span>
+                }
+<span class="nc" id="L69">                rows.add(row);</span>
+<span class="nc" id="L70">            }</span>
+<span class="nc" id="L71">            result.queryResult(headings, rows, query, args);</span>
+
+<span class="nc" id="L73">        } catch (Throwable t) {</span>
+<span class="nc" id="L74">            result.queryThrown(t, query, args);</span>
+<span class="nc" id="L75">        }</span>
+<span class="nc" id="L76">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FileUtil.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.util</a> &gt; <span class="el_source">FileUtil.java</span></div><h1>FileUtil.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.util;
+
+import net.openhft.chronicle.queue.internal.util.InternalFileUtil;
+import net.openhft.chronicle.queue.main.RemovableRollFileCandidatesMain;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.*;
+import java.util.stream.Stream;
+
+/**
+ * Utility methods for handling Files in connection with ChronicleQueue.
+ *
+ * @author Per Minborg
+ * @since 5.17.34
+ */
+public final class FileUtil {
+
+    private FileUtil() {}
+
+    /**
+     * Produces a list of removable roll file candidates and prints
+     * their absolute path to standard out row-by-row.
+     *
+     * @param args the directory. If no directory is given, &quot;.&quot; is assumed
+     */
+    @Deprecated /* For removal in x.22, Use RemovableRollFileCandidatesMain.main instead */
+    public static void main(String[] args) {
+<span class="nc" id="L28">        RemovableRollFileCandidatesMain.main(args);</span>
+<span class="nc" id="L29">    }</span>
+
+    /**
+     * Returns a Stream of roll Queue files that are likely removable
+     * from the given {@code baseDir} without affecting any Queue
+     * process that is currently active in the given {@code baseDir} reading
+     * data sequentially.
+     * &lt;p&gt;
+     * Files are returned in order of creation and can successively be removed
+     * in that order. If the removal of a particular file fails, then subsequent
+     * files must be untouched.
+     * &lt;p&gt;
+     * WARNING: This method is inherently un-deterministic as new Queue processes may
+     * join or leave at any time asynchronously. Thus, it is not recommended to store
+     * results produced by this method for longer periods.
+     * &lt;p&gt;
+     * Only sequential reading is supported because random access Tailers can read at
+     * any location at any time.
+     * &lt;p&gt;
+     * Here is an example of how unused files can be removed:
+     *
+     * &lt;pre&gt;{@code
+     *     for (File file : removableFileCandidates(baseDir).collect(Collectors.toList())) {
+     *         if (!file.delete()) {
+     *             break;
+     *         }
+     *     }
+     * }&lt;/pre&gt;
+     *
+     * @param baseDir containing queue file removal candidates
+     * @return a Stream of roll Queue files that are likely removable
+     *         from the given {@code baseDir} without affecting any Queue
+     *         process that is currently active in the given {@code baseDir}
+     *         reading data sequentially
+     * @throws UnsupportedOperationException if this operation is not
+     *         supported for the current platform (e.g. Windows).
+     */
+    @NotNull
+    public static Stream&lt;File&gt; removableRollFileCandidates(@NotNull File baseDir) {
+<span class="nc" id="L68">        return InternalFileUtil.removableRollFileCandidates(baseDir);</span>
+    }
+
+    /**
+     * Returns if the provided {@code file} has the Chronicle Queue file
+     * suffix. The current file suffix is &quot;.cq4&quot;.
+     *
+     * @param     file to check
+     * @return    if the provided {@code file} has the ChronicleQueue file
+     *            suffix
+     */
+    public static boolean hasQueueSuffix(@NotNull File file) {
+<span class="fc" id="L80">        return InternalFileUtil.hasQueueSuffix(file);</span>
+    }
+
+    /**
+     * Returns if the given {@code file } is used by any process (i.e.
+     * has the file open for reading or writing).
+     * &lt;p&gt;
+     * If the open state of the given {@code file} can not be determined, {@code true }
+     * is returned.
+     *
+     * @param    file to check
+     * @return   if the given {@code file } is used by any process
+     * @throws   UnsupportedOperationException if this operation is not
+     *           supported for the current platform (e.g. Windows).
+     */
+    public static FileState state(@NotNull File file) {
+<span class="fc" id="L96">        return InternalFileUtil.state(file);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReferenceCountedCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">ReferenceCountedCache.java</span></div><h1>ReferenceCountedCache.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.BackgroundResourceReleaser;
+import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.io.ReferenceCounted;
+import net.openhft.chronicle.core.util.ThrowingFunction;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+
+/**
+ * Thread-safe, self-cleaning cache for ReferenceCounted (and Closeable) objects
+ */
+public class ReferenceCountedCache&lt;K, T extends ReferenceCounted &amp; Closeable, V, E extends Throwable&gt;
+        extends AbstractCloseable {
+
+<span class="fc" id="L24">    private final Map&lt;K, T&gt; cache = new LinkedHashMap&lt;&gt;();</span>
+    private final Function&lt;T, V&gt; transformer;
+    private final ThrowingFunction&lt;K, T, E&gt; creator;
+<span class="fc" id="L27">    private final Runnable bgCleanup = this::bgCleanup;</span>
+
+    public ReferenceCountedCache(final Function&lt;T, V&gt; transformer,
+<span class="fc" id="L30">                                 final ThrowingFunction&lt;K, T, E&gt; creator) {</span>
+<span class="fc" id="L31">        this.transformer = transformer;</span>
+<span class="fc" id="L32">        this.creator = creator;</span>
+<span class="fc" id="L33">    }</span>
+
+    @NotNull
+    V get(@NotNull final K key) throws E {
+<span class="fc" id="L37">        throwExceptionIfClosed();</span>
+
+        final V rv;
+<span class="fc" id="L40">        synchronized (cache) {</span>
+<span class="fc" id="L41">            @Nullable T value = cache.get(key);</span>
+
+<span class="fc bfc" id="L43" title="All 2 branches covered.">            if (value == null) {</span>
+<span class="fc" id="L44">                value = creator.apply(key);</span>
+<span class="fc" id="L45">                value.reserveTransfer(INIT, this);</span>
+                //System.err.println(&quot;Reserved &quot; + value.toString() + &quot; by &quot; + this);
+<span class="fc" id="L47">                cache.put(key, value);</span>
+            }
+
+            // this will add to the ref count and so needs to be done inside of sync block
+<span class="fc" id="L51">            rv = transformer.apply(value);</span>
+<span class="fc" id="L52">        }</span>
+
+<span class="fc" id="L54">        BackgroundResourceReleaser.run(bgCleanup);</span>
+
+<span class="fc" id="L56">        return rv;</span>
+    }
+
+    @Override
+    protected void performClose() {
+<span class="fc" id="L61">        List&lt;T&gt; retained = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L62">        synchronized (cache) {</span>
+<span class="fc bfc" id="L63" title="All 2 branches covered.">            for (T value : cache.values()) {</span>
+                try {
+<span class="fc" id="L65">                    value.release(this);</span>
+<span class="fc bfc" id="L66" title="All 2 branches covered.">                    if (value.refCount() &gt; 0)</span>
+<span class="fc" id="L67">                        retained.add(value);</span>
+//                    System.err.println(&quot;Released (performClose) &quot; + value + &quot; by &quot; + this);
+<span class="nc" id="L69">                } catch (Exception e) {</span>
+<span class="nc" id="L70">                    Jvm.debug().on(getClass(), e);</span>
+<span class="fc" id="L71">                }</span>
+<span class="fc" id="L72">            }</span>
+<span class="fc" id="L73">            cache.clear();</span>
+<span class="fc" id="L74">        }</span>
+<span class="pc bpc" id="L75" title="1 of 4 branches missed.">        if (retained.isEmpty() || !Jvm.isResourceTracing())</span>
+<span class="fc" id="L76">            return;</span>
+<span class="pc bpc" id="L77" title="1 of 2 branches missed.">        for (int i = 1; i &lt;= 2_000; i++) {</span>
+<span class="fc" id="L78">            Jvm.pause(1);</span>
+<span class="fc bfc" id="L79" title="All 4 branches covered.">            if (retained.stream().noneMatch(v -&gt; v.refCount() &gt; 0)) {</span>
+<span class="fc bfc" id="L80" title="All 2 branches covered.">                if (i &gt; 1)</span>
+<span class="fc" id="L81">                    Jvm.perf().on(getClass(), &quot;Took &quot; + i + &quot; to release &quot; + retained);</span>
+<span class="fc" id="L82">                return;</span>
+            }
+        }
+<span class="nc" id="L85">        Jvm.warn().on(getClass(), &quot;STILL retained &quot; + retained);</span>
+
+<span class="nc" id="L87">    }</span>
+
+    @Override
+    protected boolean threadSafetyCheck(final boolean isUsed) {
+<span class="fc" id="L91">        return true;</span>
+    }
+
+    void bgCleanup() {
+        // remove all which have been de-referenced by other than me. Garbagy but rare
+<span class="fc" id="L96">        synchronized (cache) {</span>
+<span class="fc" id="L97">            cache.entrySet().removeIf(entry -&gt; {</span>
+<span class="fc" id="L98">                T value = entry.getValue();</span>
+<span class="fc" id="L99">                int refCount = value.refCount();</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">                if (refCount == 1) {</span>
+<span class="fc" id="L101">                    value.release(this);</span>
+                }
+<span class="fc bfc" id="L103" title="All 2 branches covered.">                return refCount &lt;= 1;</span>
+            });
+<span class="fc" id="L105">        }</span>
+<span class="fc" id="L106">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

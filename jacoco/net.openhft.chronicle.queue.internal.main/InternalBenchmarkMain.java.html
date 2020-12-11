@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InternalBenchmarkMain.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.internal.main</a> &gt; <span class="el_source">InternalBenchmarkMain.java</span></div><h1>InternalBenchmarkMain.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.internal.main;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.MappedFile;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.Memory;
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.io.IOTools;
+import net.openhft.chronicle.core.util.Histogram;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptAppender;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.threads.Pauser;
+import net.openhft.chronicle.wire.DocumentContext;
+import net.openhft.chronicle.wire.Wire;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.concurrent.locks.LockSupport;
+
+<span class="nc" id="L20">public class InternalBenchmarkMain {</span>
+<span class="nc" id="L21">    static volatile boolean running = true;</span>
+<span class="nc" id="L22">    static int throughput = Integer.getInteger(&quot;throughput&quot;, 250); // MB/s</span>
+<span class="nc" id="L23">    static int runtime = Integer.getInteger(&quot;runtime&quot;, 300); // seconds</span>
+<span class="nc" id="L24">    static String basePath = System.getProperty(&quot;path&quot;, OS.TMP);</span>
+<span class="nc" id="L25">    static volatile long readerLoopTime = 0;</span>
+<span class="nc" id="L26">    static volatile long readerEndLoopTime = 0;</span>
+<span class="nc" id="L27">    static int counter = 0;</span>
+
+    static {
+<span class="nc" id="L30">        System.setProperty(&quot;jvm.safepoint.enabled&quot;, &quot;true&quot;);</span>
+<span class="nc" id="L31">    }</span>
+
+    public static void main(String[] args) {
+<span class="nc" id="L34">        System.out.println(</span>
+                &quot;-Dthroughput=&quot; + throughput
+                        + &quot; -Druntime=&quot; + runtime
+                        + &quot; -Dpath=&quot; + basePath);
+<span class="nc" id="L38">        MappedFile.warmup();</span>
+<span class="nc" id="L39">        System.out.println(&quot;Warming up&quot;);</span>
+<span class="nc" id="L40">        benchmark(128);</span>
+<span class="nc" id="L41">        System.out.println(&quot;Warmed up&quot;);</span>
+<span class="nc bnc" id="L42" title="All 2 branches missed.">        for (int size = 64; size &lt;= 16 &lt;&lt; 20; size *= 4) {</span>
+<span class="nc" id="L43">            benchmark(size);</span>
+        }
+<span class="nc" id="L45">    }</span>
+
+    static void benchmark(int messageSize) {
+<span class="nc" id="L48">        Histogram writeTime = new Histogram(32, 7);</span>
+<span class="nc" id="L49">        Histogram transportTime = new Histogram(32, 7);</span>
+<span class="nc" id="L50">        Histogram readTime = new Histogram(32, 7);</span>
+<span class="nc" id="L51">        String path = basePath + &quot;/test-q-&quot; + messageSize;</span>
+
+<span class="nc" id="L53">        ChronicleQueue queue = createQueue(path);</span>
+
+<span class="nc" id="L55">        Thread pretoucher = new Thread(() -&gt; {</span>
+<span class="nc" id="L56">            ExcerptAppender appender = queue.acquireAppender();</span>
+<span class="nc" id="L57">            Thread thread = Thread.currentThread();</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">            while (!thread.isInterrupted()) {</span>
+<span class="nc" id="L59">                appender.pretouch();</span>
+<span class="nc" id="L60">                Jvm.pause(10);</span>
+            }
+<span class="nc" id="L62">        });</span>
+<span class="nc" id="L63">        pretoucher.setDaemon(true);</span>
+<span class="nc" id="L64">        pretoucher.start();</span>
+
+<span class="nc" id="L66">        Histogram loopTime = new Histogram();</span>
+
+<span class="nc" id="L68">        Thread reader = new Thread(() -&gt; {</span>
+//            try (ChronicleQueue queue2 = createQueue(path))
+<span class="nc" id="L70">            ExcerptTailer tailer = queue.createTailer().toEnd();</span>
+<span class="nc" id="L71">            long endLoop = System.nanoTime();</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            while (running) {</span>
+<span class="nc" id="L73">                loopTime.sample((double) (System.nanoTime() - endLoop));</span>
+<span class="nc" id="L74">                Jvm.safepoint();</span>
+
+//                    readerLoopTime = System.nanoTime();
+//                    if (readerLoopTime - readerEndLoopTime &gt; 1000)
+//                        System.out.println(&quot;r &quot; + (readerLoopTime - readerEndLoopTime));
+//                try {
+<span class="nc" id="L80">                runInner(transportTime, readTime, tailer);</span>
+<span class="nc" id="L81">                runInner(transportTime, readTime, tailer);</span>
+<span class="nc" id="L82">                runInner(transportTime, readTime, tailer);</span>
+<span class="nc" id="L83">                runInner(transportTime, readTime, tailer);</span>
+//                } finally {
+//                        readerEndLoopTime = System.nanoTime();
+//                }
+<span class="nc" id="L87">                Jvm.safepoint();</span>
+<span class="nc" id="L88">                endLoop = System.nanoTime();</span>
+            }
+<span class="nc" id="L90">        });</span>
+<span class="nc" id="L91">        reader.start();</span>
+<span class="nc" id="L92">        Jvm.pause(250); // give the reader time to start</span>
+<span class="nc" id="L93">        long next = System.nanoTime();</span>
+<span class="nc" id="L94">        long end = (long) (next + runtime * 1e9);</span>
+
+<span class="nc" id="L96">        ExcerptAppender appender = queue.acquireAppender();</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        while (end &gt; System.nanoTime()) {</span>
+<span class="nc" id="L98">            long start = System.nanoTime();</span>
+<span class="nc" id="L99">            try (DocumentContext dc = appender.writingDocument(false)) {</span>
+<span class="nc" id="L100">                writeMessage(dc.wire(), messageSize);</span>
+            }
+<span class="nc" id="L102">            long written = System.nanoTime();</span>
+<span class="nc" id="L103">            long time = written - start;</span>
+//                System.out.println(time);
+<span class="nc" id="L105">            writeTime.sample(time);</span>
+
+<span class="nc" id="L107">            long diff = writeTime.totalCount() - readTime.totalCount();</span>
+<span class="nc" id="L108">            Thread.yield();</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (diff &gt;= 200) {</span>
+//                long rlt = readerLoopTime;
+//                long delay = System.nanoTime() - rlt;
+<span class="nc" id="L112">                System.out.println(&quot;diff=&quot; + diff /* +&quot; delay= &quot; + delay*/);</span>
+<span class="nc" id="L113">                StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L114">                sb.append(&quot;Reader: profile of the thread&quot;);</span>
+<span class="nc" id="L115">                Jvm.trimStackTrace(sb, reader.getStackTrace());</span>
+<span class="nc" id="L116">                System.out.println(sb);</span>
+            }
+
+<span class="nc" id="L119">            next += messageSize * 1e9 / (throughput * 1e6);</span>
+<span class="nc" id="L120">            long delay = next - System.nanoTime();</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">            if (delay &gt; 0)</span>
+<span class="nc" id="L122">                LockSupport.parkNanos(delay);</span>
+<span class="nc" id="L123">        }</span>
+
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        while (readTime.totalCount() &lt; writeTime.totalCount())</span>
+<span class="nc" id="L126">            Jvm.pause(50);</span>
+
+<span class="nc" id="L128">        pretoucher.interrupt();</span>
+<span class="nc" id="L129">        reader.interrupt();</span>
+<span class="nc" id="L130">        running = false;</span>
+//        monitor.interrupt();
+
+<span class="nc" id="L133">        System.out.println(&quot;Loop times &quot; + loopTime.toMicrosFormat());</span>
+<span class="nc" id="L134">        System.out.println(&quot;messageSize &quot; + messageSize);</span>
+<span class="nc" id="L135">        System.out.println(&quot;messages &quot; + writeTime.totalCount());</span>
+<span class="nc" id="L136">        System.out.println(&quot;write histogram: &quot; + writeTime.toMicrosFormat());</span>
+<span class="nc" id="L137">        System.out.println(&quot;transport histogram: &quot; + transportTime.toMicrosFormat());</span>
+<span class="nc" id="L138">        System.out.println(&quot;read histogram: &quot; + readTime.toMicrosFormat());</span>
+<span class="nc" id="L139">        IOTools.deleteDirWithFiles(path, 2);</span>
+<span class="nc" id="L140">        Jvm.pause(1000);</span>
+<span class="nc" id="L141">    }</span>
+
+    private static void runInner(Histogram transportTime, Histogram readTime, ExcerptTailer tailer) {
+<span class="nc" id="L144">        Jvm.safepoint();</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (tailer.peekDocument()) {</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if (counter++ &lt; 1000) {</span>
+<span class="nc" id="L147">                Jvm.safepoint();</span>
+<span class="nc" id="L148">                return;</span>
+            }
+        }
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (counter &gt; 0)</span>
+<span class="nc" id="L152">            Jvm.safepoint();</span>
+        else
+<span class="nc" id="L154">            Jvm.safepoint();</span>
+<span class="nc" id="L155">        counter = 0;</span>
+<span class="nc" id="L156">        try (DocumentContext dc = tailer.readingDocument(false)) {</span>
+<span class="nc" id="L157">            Jvm.safepoint();</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            if (!dc.isPresent()) {</span>
+<span class="nc" id="L159">                return;</span>
+            }
+<span class="nc" id="L161">            long transport = System.nanoTime();</span>
+<span class="nc" id="L162">            Jvm.safepoint();</span>
+<span class="nc" id="L163">            Wire wire = dc.wire();</span>
+<span class="nc" id="L164">            Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="nc" id="L165">            long start = readMessage(bytes);</span>
+<span class="nc" id="L166">            long end = System.nanoTime();</span>
+<span class="nc" id="L167">            transportTime.sample((double) (transport - start));</span>
+<span class="nc" id="L168">            readTime.sample((double) (end - transport));</span>
+        }
+<span class="nc" id="L170">        Jvm.safepoint();</span>
+<span class="nc" id="L171">    }</span>
+
+    @NotNull
+    private static ChronicleQueue createQueue(String path) {
+<span class="nc" id="L175">        return ChronicleQueue.singleBuilder(path)</span>
+<span class="nc" id="L176">                .blockSize(1 &lt;&lt; 30)</span>
+<span class="nc" id="L177">                .pauserSupplier(Pauser::timedBusy)</span>
+<span class="nc" id="L178">                .build();</span>
+    }
+
+    private static long readMessage(Bytes&lt;?&gt; bytes) {
+<span class="nc" id="L182">        Jvm.safepoint();</span>
+<span class="nc" id="L183">        long start = bytes.readLong();</span>
+<span class="nc" id="L184">        long rp = bytes.readPosition();</span>
+<span class="nc" id="L185">        long rl = bytes.readLimit();</span>
+<span class="nc" id="L186">        long addr = bytes.addressForRead(rp);</span>
+<span class="nc" id="L187">        long addrEnd = bytes.addressForRead(rl);</span>
+<span class="nc" id="L188">        Memory memory = OS.memory();</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        for (addr += 8; addr + 7 &lt; addrEnd; addr += 8)</span>
+<span class="nc" id="L190">            memory.readLong(addr);</span>
+<span class="nc" id="L191">        Jvm.safepoint();</span>
+<span class="nc" id="L192">        return start;</span>
+    }
+
+    private static void writeMessage(Wire wire, int messageSize) {
+<span class="nc" id="L196">        Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="nc" id="L197">        long wp = bytes.writePosition();</span>
+<span class="nc" id="L198">        long addr = bytes.addressForWrite(wp);</span>
+<span class="nc" id="L199">        Memory memory = OS.memory();</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        for (int i = 0; i &lt; messageSize; i += 16) {</span>
+<span class="nc" id="L201">            memory.writeLong(addr + i, 0L);</span>
+<span class="nc" id="L202">            memory.writeLong(addr + i + 8, 0L);</span>
+        }
+
+<span class="nc" id="L205">        bytes.writeSkip(messageSize);</span>
+<span class="nc" id="L206">        bytes.writeLong(wp, System.nanoTime());</span>
+<span class="nc" id="L207">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

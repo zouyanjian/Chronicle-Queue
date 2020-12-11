@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QueuePingPongMain.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.jitter</a> &gt; <span class="el_source">QueuePingPongMain.java</span></div><h1>QueuePingPongMain.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.jitter;
+
+import net.openhft.chronicle.bytes.MappedFile;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.io.IOTools;
+import net.openhft.chronicle.core.util.Histogram;
+import net.openhft.chronicle.core.util.Time;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptAppender;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.wire.DocumentContext;
+import org.jetbrains.annotations.NotNull;
+
+@Deprecated /* For removal for x.22, Use main.PingPongMain instead*/
+<span class="nc" id="L16">public class QueuePingPongMain {</span>
+    //    static int throughput = Integer.getInteger(&quot;throughput&quot;, 250); // MB/s
+<span class="nc" id="L18">    static int runtime = Integer.getInteger(&quot;runtime&quot;, 30); // seconds</span>
+<span class="nc" id="L19">    static String basePath = System.getProperty(&quot;path&quot;, OS.TMP);</span>
+<span class="nc" id="L20">    static volatile long writeTime = 0;</span>
+<span class="nc" id="L21">    static volatile int writeCount = 0;</span>
+<span class="nc" id="L22">    static volatile int readCount = 0;</span>
+<span class="nc" id="L23">    static volatile boolean running = true;</span>
+
+    static {
+<span class="nc" id="L26">        System.setProperty(&quot;jvm.safepoint.enabled&quot;, &quot;true&quot;);</span>
+<span class="nc" id="L27">    }</span>
+
+    public static void main(String[] args) {
+<span class="nc" id="L30">        System.out.println(</span>
+//                &quot;-Dthroughput=&quot; + throughput
+                &quot; -Druntime=&quot; + runtime
+                        + &quot; -Dpath=&quot; + basePath);
+<span class="nc" id="L34">        MappedFile.warmup();</span>
+
+<span class="nc" id="L36">        pingPong(64);</span>
+<span class="nc" id="L37">    }</span>
+
+    static void pingPong(int size) {
+<span class="nc" id="L40">        String path = QueuePingPongMain.basePath + &quot;/test-q-&quot; + Time.uniqueId();</span>
+<span class="nc" id="L41">        Histogram readDelay = new Histogram();</span>
+<span class="nc" id="L42">        Histogram readDelay2 = new Histogram();</span>
+<span class="nc" id="L43">        try (ChronicleQueue queue = createQueue(path)) {</span>
+
+<span class="nc" id="L45">            Thread reader = new Thread(() -&gt; {</span>
+<span class="nc" id="L46">                ExcerptTailer tailer = queue.createTailer();</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">                while (running) {</span>
+                    //noinspection StatementWithEmptyBody
+<span class="nc bnc" id="L49" title="All 2 branches missed.">                    while (readCount == writeCount) ;</span>
+
+<span class="nc" id="L51">                    long wakeTime = System.nanoTime();</span>
+<span class="nc bnc" id="L52" title="All 2 branches missed.">                    while (running) {</span>
+<span class="nc" id="L53">                        try (DocumentContext dc = tailer.readingDocument(true)) {</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">                            if (!dc.isPresent())</span>
+                                continue;
+                        }
+<span class="nc" id="L57">                        break;</span>
+                    }
+<span class="nc" id="L59">                    long delay = wakeTime - writeTime;</span>
+<span class="nc" id="L60">                    long time = System.nanoTime() - wakeTime;</span>
+<span class="nc" id="L61">                    readDelay2.sample(time);</span>
+<span class="nc" id="L62">                    readDelay.sample(delay);</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">                    if (time + delay &gt; 20_000)</span>
+<span class="nc" id="L64">                        System.out.println(&quot;td &quot; + delay + &quot; + &quot; + time);</span>
+<span class="nc bnc" id="L65" title="All 2 branches missed.">                    if (readCount == 100000) {</span>
+<span class="nc" id="L66">                        System.out.println(&quot;reset&quot;);</span>
+<span class="nc" id="L67">                        readDelay.reset();</span>
+<span class="nc" id="L68">                        readDelay2.reset();</span>
+                    }
+<span class="nc" id="L70">                    readCount++;</span>
+<span class="nc" id="L71">                }</span>
+<span class="nc" id="L72">            });</span>
+<span class="nc" id="L73">            reader.setDaemon(true);</span>
+<span class="nc" id="L74">            reader.start();</span>
+<span class="nc" id="L75">            Jvm.pause(100);</span>
+
+<span class="nc" id="L77">            long finish = System.currentTimeMillis() + runtime * 1000;</span>
+<span class="nc" id="L78">            ExcerptAppender appender = queue.acquireAppender();</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            while (System.currentTimeMillis() &lt; finish) {</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                if (readCount &lt; writeCount) {</span>
+<span class="nc" id="L81">                    Thread.yield();</span>
+<span class="nc" id="L82">                    continue;</span>
+                }
+<span class="nc" id="L84">                try (DocumentContext dc = appender.writingDocument(false)) {</span>
+<span class="nc" id="L85">                    dc.wire().bytes().writeSkip(size);</span>
+                }
+<span class="nc" id="L87">                writeCount++;</span>
+<span class="nc" id="L88">                writeTime = System.nanoTime();</span>
+            }
+<span class="nc" id="L90">            running = false;</span>
+        }
+<span class="nc" id="L92">        System.out.println(&quot;read delay: &quot; + readDelay.toMicrosFormat());</span>
+<span class="nc" id="L93">        System.out.println(&quot;read delay2: &quot; + readDelay2.toMicrosFormat());</span>
+<span class="nc" id="L94">        IOTools.deleteDirWithFiles(path, 2);</span>
+<span class="nc" id="L95">    }</span>
+
+    @NotNull
+    private static ChronicleQueue createQueue(String path) {
+<span class="nc" id="L99">        return ChronicleQueue.single(path);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

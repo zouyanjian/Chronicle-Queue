@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExcerptAppender.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue</a> &gt; <span class="el_source">ExcerptAppender.java</span></div><h1>ExcerptAppender.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.BytesStore;
+import net.openhft.chronicle.queue.batch.BatchAppender;
+import net.openhft.chronicle.wire.MarshallableOut;
+import net.openhft.chronicle.wire.UnrecoverableTimeoutException;
+import net.openhft.chronicle.wire.VanillaMethodWriterBuilder;
+import net.openhft.chronicle.wire.Wire;
+import org.jetbrains.annotations.NotNull;
+
+/**
+ * &lt;p&gt;The component that facilitates sequentially writing data to a {@link ChronicleQueue}.&lt;/p&gt;
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Appenders are NOT thread-safe, sharing the Appender between threads will lead to errors and unpredictable behaviour.&lt;/p&gt;
+ */
+public interface ExcerptAppender extends ExcerptCommon&lt;ExcerptAppender&gt;, MarshallableOut {
+
+    /**
+     * Writes (i.e. appends) the provided {@code bytes} to the queue.
+     *
+     * @param bytes to write to excerpt.
+     */
+    void writeBytes(@NotNull BytesStore bytes) throws UnrecoverableTimeoutException;
+
+    /**
+     * Writes (i.e. appends) the provided {@code bytes} to the queue.
+     *
+     * @param bytes to write to excerpt.
+     */
+    default void writeBytes(@NotNull Bytes bytes) throws UnrecoverableTimeoutException {
+<span class="fc" id="L48">        writeBytes((BytesStore) bytes);</span>
+<span class="fc" id="L49">    }</span>
+
+    /**
+     * Returns the index last written.
+     * &lt;p&gt;
+     * The index includes the cycle and the sequence number.
+     *
+     * @return the index last written
+     * @throws IllegalStateException if no index is available
+     */
+    long lastIndexAppended();
+
+    /**
+     * Returns the cycle this appender is on.
+     * &lt;p&gt;
+     * Usually with chronicle-queue each cycle will have its
+     * own unique data file to store the excerpts
+     *
+     * @return the cycle this appender is on
+     */
+    int cycle();
+
+    /**
+     * Pre-touches storage resources for the current queue so that appenders
+     * may exhibit more predictable latencies.
+     * &lt;p&gt;
+     * Pre-touching involves accessing pages of files/memory that are likely accessed in a
+     * near future and may also involve accessing/acquiring future cycle files.
+     * &lt;p&gt;
+     * We suggest this code is called from a background thread [ not you main
+     * business thread ], it must be called from the same thread that created it, as the call to
+     * pretouch() is not thread safe. For example :
+     * &lt;p&gt;
+     * &lt;code&gt;newSingleThreadScheduledExecutor().scheduleAtFixedRate(() -&amp;gt; queue.acquireAppender().pretouch(), 0, 1, TimeUnit.SECONDS);&lt;/code&gt;
+     */
+    default void pretouch() {
+<span class="nc" id="L85">    }</span>
+
+    /**
+     * Creates and returns a new writer proxy for the given interface {@code tclass} and the given {@code additional }
+     * interfaces.
+     * &lt;p&gt;
+     * When methods are invoked on the returned T object, messages will be put in the queue.
+     * &lt;p&gt;
+     * &lt;b&gt;
+     * Writers are NOT thread-safe. Sharing a Writer across threads will lead to errors and unpredictable behaviour.
+     * &lt;/b&gt;
+     *
+     * @param tClass     of the main interface to be implemented
+     * @param additional interfaces to be implemented
+     * @param &lt;T&gt;        type parameter of the main interface
+     * @return a new proxy for the given interface {@code tclass} and the given {@code additional }
+     * interfaces
+     * @throws NullPointerException if any of the provided parameters are {@code null}.
+     */
+    @NotNull
+    default &lt;T&gt; T methodWriter(@NotNull Class&lt;T&gt; tClass, Class... additional) {
+<span class="fc" id="L106">        return queue().methodWriter(tClass, additional);</span>
+    }
+
+    /**
+     * Creates and returns a new writer proxy for the given interface {@code tclass}.
+     * &lt;p&gt;
+     * When methods are invoked on the returned T object, messages will be put in the queue.
+     * &lt;p&gt;
+     * &lt;b&gt;
+     * Writers are NOT thread-safe. Sharing a Writer across threads will lead to errors and unpredictable behaviour.
+     * &lt;/b&gt;
+     *
+     * @param tClass of the main interface to be implemented
+     * @param &lt;T&gt;    type parameter of the main interface
+     * @return a new proxy for the given interface {@code tclass}
+     * @throws NullPointerException if the provided parameter is {@code null}.
+     */
+    @NotNull
+    default &lt;T&gt; VanillaMethodWriterBuilder&lt;T&gt; methodWriterBuilder(@NotNull Class&lt;T&gt; tClass) {
+<span class="fc" id="L125">        return queue().methodWriterBuilder(tClass);</span>
+    }
+
+    /**
+     * Returns a raw wire for low level direct access.
+     *
+     * @return a raw wire for low level direct access
+     */
+    Wire wire();
+
+    /**
+     * Appends a number of excerpts in a single batch operation.
+     *
+     * @param timeoutMS     time out in miliseconds
+     * @param batchAppender to apply for the batch append
+     * @return the number of messages written in call the batches
+     * @see BatchAppender
+     * @deprecated This method is not recommended unless you really
+     * know what you are doing. Misuse of this API could corrupt your data or even
+     * worst cause the JVM or your application to crash.
+     */
+    @Deprecated(/* to be removed in x.22 */)
+    long batchAppend(int timeoutMS, BatchAppender batchAppender);
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

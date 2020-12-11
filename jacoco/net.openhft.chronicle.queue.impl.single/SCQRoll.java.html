@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SCQRoll.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">SCQRoll.java</span></div><h1>SCQRoll.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *  you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.core.annotation.UsedViaReflection;
+import net.openhft.chronicle.queue.RollCycle;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.time.LocalTime;
+import java.time.ZoneId;
+
+class SCQRoll implements Demarshallable, WriteMarshallable {
+    private int length;
+    @Nullable
+    private String format;
+    @Nullable
+    private LocalTime rollTime;
+    @Nullable
+    private ZoneId rollTimeZone;
+    private long epoch;
+
+    /**
+     * used by {@link Demarshallable}
+     *
+     * @param wire a wire
+     */
+    @UsedViaReflection
+<span class="fc" id="L45">    private SCQRoll(@NotNull WireIn wire) {</span>
+<span class="fc" id="L46">        length = wire.read(RollFields.length).int32();</span>
+<span class="fc" id="L47">        format = wire.read(RollFields.format).text();</span>
+<span class="fc" id="L48">        epoch = wire.read(RollFields.epoch).int64();</span>
+<span class="fc" id="L49">        ValueIn rollTimeVIN = wire.read(RollFields.rollTime);</span>
+<span class="fc bfc" id="L50" title="All 2 branches covered.">        if (rollTimeVIN.hasNext())</span>
+<span class="fc" id="L51">            rollTime = rollTimeVIN.time();</span>
+<span class="fc" id="L52">        String zoneId = wire.read(RollFields.rollTimeZone).text();</span>
+<span class="fc bfc" id="L53" title="All 2 branches covered.">        if (zoneId != null)</span>
+<span class="fc" id="L54">            rollTimeZone = ZoneId.of(zoneId);</span>
+        else
+<span class="fc" id="L56">            rollTimeZone = null;</span>
+<span class="fc" id="L57">    }</span>
+
+    SCQRoll(@NotNull RollCycle rollCycle,
+            long epoch,
+            @Nullable LocalTime rollTime,
+<span class="fc" id="L62">            @Nullable ZoneId rollTimeZone) {</span>
+<span class="fc" id="L63">        this.length = rollCycle.lengthInMillis();</span>
+<span class="fc" id="L64">        this.format = rollCycle.format();</span>
+<span class="fc" id="L65">        this.epoch = epoch;</span>
+<span class="fc" id="L66">        this.rollTime = rollTime;</span>
+<span class="fc" id="L67">        this.rollTimeZone = rollTimeZone;</span>
+<span class="fc" id="L68">    }</span>
+
+    @Override
+    public void writeMarshallable(@NotNull WireOut wire) {
+<span class="fc" id="L72">        wire.write(RollFields.length).int32(length)</span>
+<span class="fc" id="L73">                .write(RollFields.format).text(format)</span>
+<span class="fc" id="L74">                .write(RollFields.epoch).int64(epoch);</span>
+<span class="fc bfc" id="L75" title="All 2 branches covered.">        if (rollTime != null)</span>
+<span class="fc" id="L76">            wire.write(RollFields.rollTime).time(rollTime);</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">        if (rollTimeZone != null)</span>
+<span class="fc" id="L78">            wire.write(RollFields.rollTimeZone).text(rollTimeZone.getId());</span>
+
+<span class="fc" id="L80">    }</span>
+
+    /**
+     * @return an epoch offset as the number of number of milliseconds since January 1, 1970,
+     * 00:00:00 GMT
+     */
+    public long epoch() {
+<span class="fc" id="L87">        return this.epoch;</span>
+    }
+
+    public String format() {
+<span class="fc" id="L91">        return this.format;</span>
+    }
+
+    int length() {
+<span class="fc" id="L95">        return length;</span>
+    }
+
+    @Nullable
+    public LocalTime rollTime() {
+<span class="fc" id="L100">        return rollTime;</span>
+    }
+
+    @Nullable
+    public ZoneId rollTimeZone() {
+<span class="fc" id="L105">        return rollTimeZone;</span>
+    }
+
+    public void length(int length) {
+<span class="fc" id="L109">        this.length = length;</span>
+<span class="fc" id="L110">    }</span>
+
+    public void format(@Nullable String format) {
+<span class="fc" id="L113">        this.format = format;</span>
+<span class="fc" id="L114">    }</span>
+
+    public void rollTime(@Nullable LocalTime rollTime) {
+<span class="nc" id="L117">        this.rollTime = rollTime;</span>
+<span class="nc" id="L118">    }</span>
+
+    public void rollTimeZone(@Nullable ZoneId rollTimeZone) {
+<span class="nc" id="L121">        this.rollTimeZone = rollTimeZone;</span>
+<span class="nc" id="L122">    }</span>
+
+    public void epoch(long epoch) {
+<span class="fc" id="L125">        this.epoch = epoch;</span>
+<span class="fc" id="L126">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L130">        return &quot;SCQRoll{&quot; +</span>
+                &quot;length=&quot; + length +
+                &quot;, format='&quot; + format + '\'' +
+                &quot;, epoch=&quot; + epoch +
+                &quot;, rollTime=&quot; + rollTime +
+                &quot;, rollTimeZone=&quot; + rollTimeZone +
+                '}';
+    }
+
+<span class="fc" id="L139">    enum RollFields implements WireKey {</span>
+<span class="fc" id="L140">        length, format, epoch, rollTime, rollTimeZone</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

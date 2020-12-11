@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QueueOffsetSpec.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.internal.domestic</a> &gt; <span class="el_source">QueueOffsetSpec.java</span></div><h1>QueueOffsetSpec.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.internal.domestic;
+
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.util.Arrays;
+import java.util.function.Function;
+
+public final class QueueOffsetSpec {
+
+    private static final String TOKEN_DELIMITER = &quot;;&quot;;
+    private final Type type;
+    private final String[] spec;
+<span class="fc" id="L16">    private QueueOffsetSpec(final Type type, final String[] spec) {</span>
+<span class="fc" id="L17">        this.type = type;</span>
+<span class="fc" id="L18">        this.spec = spec;</span>
+<span class="fc" id="L19">    }</span>
+
+    public static QueueOffsetSpec ofEpoch(final long epoch) {
+<span class="fc" id="L22">        return new QueueOffsetSpec(Type.EPOCH, new String[]{Long.toString(epoch)});</span>
+    }
+
+    public static QueueOffsetSpec ofRollTime(@NotNull final LocalTime time, @NotNull final ZoneId zoneId) {
+<span class="fc" id="L26">        return new QueueOffsetSpec(Type.ROLL_TIME, new String[]{time.toString(), zoneId.toString()});</span>
+    }
+
+    public static QueueOffsetSpec ofNone() {
+<span class="nc" id="L30">        return new QueueOffsetSpec(Type.NONE, new String[]{});</span>
+    }
+
+    public static QueueOffsetSpec parse(@NotNull final String definition) {
+<span class="nc" id="L34">        final String[] tokens = definition.split(TOKEN_DELIMITER);</span>
+<span class="nc" id="L35">        final Type type = Type.valueOf(tokens[0]);</span>
+<span class="nc bnc" id="L36" title="All 4 branches missed.">        switch (type) {</span>
+            case EPOCH:
+<span class="nc" id="L38">                expectArgs(tokens, 2);</span>
+<span class="nc" id="L39">                return new QueueOffsetSpec(type, new String[]{tokens[1]});</span>
+            case ROLL_TIME:
+<span class="nc" id="L41">                expectArgs(tokens, 3);</span>
+<span class="nc" id="L42">                return new QueueOffsetSpec(type, new String[]{tokens[1], tokens[2]});</span>
+            case NONE:
+<span class="nc" id="L44">                expectArgs(tokens, 1);</span>
+<span class="nc" id="L45">                return new QueueOffsetSpec(type, new String[]{});</span>
+            default:
+<span class="nc" id="L47">                throw new IllegalArgumentException(&quot;Unknown type: &quot; + type);</span>
+        }
+    }
+
+    public static String formatEpochOffset(final long epochOffset) {
+<span class="nc" id="L52">        return String.format(&quot;%s;%s&quot;, Type.EPOCH.name(), Long.toString(epochOffset));</span>
+    }
+
+    public static String formatRollTime(final LocalTime time, final ZoneId zoneId) {
+<span class="nc" id="L56">        return String.format(&quot;%s;%s;%s&quot;, Type.ROLL_TIME.name(), time.toString(), zoneId.toString());</span>
+    }
+
+    public static String formatNone() {
+<span class="nc" id="L60">        return Type.NONE.name();</span>
+    }
+
+    private static ZoneId toZoneId(final String zoneId) {
+<span class="nc" id="L64">        return ZoneId.of(zoneId);</span>
+    }
+
+    private static LocalTime toLocalTime(final String timestamp) {
+<span class="nc" id="L68">        return LocalTime.parse(timestamp);</span>
+    }
+
+    private static void expectArgs(final String[] tokens, final int expectedLength) {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">        if (tokens.length != expectedLength) {</span>
+<span class="nc" id="L73">            throw new IllegalArgumentException(&quot;Expected &quot; + expectedLength + &quot; tokens in &quot; + Arrays.toString(tokens));</span>
+        }
+<span class="nc" id="L75">    }</span>
+
+    public void apply(final SingleChronicleQueueBuilder builder) {
+<span class="nc bnc" id="L78" title="All 4 branches missed.">        switch (type) {</span>
+            case EPOCH:
+<span class="nc" id="L80">                builder.epoch(Long.parseLong(spec[0]));</span>
+<span class="nc" id="L81">                break;</span>
+            case ROLL_TIME:
+<span class="nc" id="L83">                builder.rollTime(toLocalTime(spec[0]), toZoneId(spec[1]));</span>
+<span class="nc" id="L84">                break;</span>
+            case NONE:
+<span class="nc" id="L86">                break;</span>
+            default:
+<span class="nc" id="L88">                throw new IllegalArgumentException(&quot;Unknown type: &quot; + type);</span>
+        }
+<span class="nc" id="L90">    }</span>
+
+    public String format() {
+<span class="nc" id="L93">        return type.name() + TOKEN_DELIMITER + type.argFormatter.apply(spec);</span>
+    }
+
+    public void validate() {
+<span class="nc bnc" id="L97" title="All 4 branches missed.">        switch (type) {</span>
+            case EPOCH:
+<span class="nc" id="L99">                Long.parseLong(spec[0]);</span>
+<span class="nc" id="L100">                break;</span>
+            case ROLL_TIME:
+<span class="nc" id="L102">                toLocalTime(spec[0]);</span>
+<span class="nc" id="L103">                toZoneId(spec[1]);</span>
+<span class="nc" id="L104">                break;</span>
+            case NONE:
+<span class="nc" id="L106">                break;</span>
+            default:
+<span class="nc" id="L108">                throw new IllegalArgumentException(&quot;Unknown type: &quot; + type);</span>
+        }
+<span class="nc" id="L110">    }</span>
+
+<span class="fc" id="L112">    public enum Type {</span>
+<span class="pc" id="L113">        EPOCH(args -&gt; args[0]),</span>
+<span class="pc" id="L114">        ROLL_TIME(args -&gt; args[0] + TOKEN_DELIMITER + args[1]),</span>
+<span class="pc" id="L115">        NONE(args -&gt; &quot;&quot;);</span>
+
+        private final Function&lt;String[], String&gt; argFormatter;
+
+<span class="fc" id="L119">        Type(final Function&lt;String[], String&gt; argFormatter) {</span>
+<span class="fc" id="L120">            this.argFormatter = argFormatter;</span>
+<span class="fc" id="L121">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

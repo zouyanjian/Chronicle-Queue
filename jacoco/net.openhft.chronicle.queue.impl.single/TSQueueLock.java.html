@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TSQueueLock.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">TSQueueLock.java</span></div><h1>TSQueueLock.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2014-2017 Higher Frequency Trading
+ *
+ * http://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.queue.impl.TableStore;
+import net.openhft.chronicle.queue.impl.table.AbstractTSQueueLock;
+import net.openhft.chronicle.threads.TimingPauser;
+import net.openhft.chronicle.wire.UnrecoverableTimeoutException;
+
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
+
+import static net.openhft.chronicle.core.Jvm.warn;
+
+/**
+ * Implements queue lock via TableStore mechanism.
+ */
+public class TSQueueLock extends AbstractTSQueueLock implements QueueLock {
+
+    private static final String LOCK_KEY = &quot;chronicle.queue.lock&quot;;
+    private final long timeout;
+
+    public TSQueueLock(final TableStore&lt;?&gt; tableStore, Supplier&lt;TimingPauser&gt; pauser, long timeoutMs) {
+<span class="nc" id="L40">        super(LOCK_KEY, tableStore, pauser);</span>
+<span class="nc" id="L41">        timeout = timeoutMs;</span>
+<span class="nc" id="L42">    }</span>
+
+    /**
+     * Stores current PID to table store, and any other process trying to acquire lock will wait for
+     * &lt;code&gt;chronicle.queue.lock.timeoutMS&lt;/code&gt; millis (default is 30000) for the lock to be released, and if it is not
+     * able to lock, *overrides the lock*.
+     */
+    @Override
+    public void acquireLock() {
+<span class="nc" id="L51">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L53">        long tid = Thread.currentThread().getId();</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        if (isLockHeldByCurrentThread(tid)) {</span>
+<span class="nc" id="L55">            return;</span>
+        }
+<span class="nc" id="L57">        int count = 0;</span>
+<span class="nc" id="L58">        long lockValueFromTid = getLockValueFromTid(tid);</span>
+<span class="nc" id="L59">        long value = lock.getVolatileValue();</span>
+        try {
+<span class="nc bnc" id="L61" title="All 2 branches missed.">            while (!lock.compareAndSwapValue(UNLOCKED, lockValueFromTid)) {</span>
+<span class="nc bnc" id="L62" title="All 4 branches missed.">                if (count++ &gt; 1000 &amp;&amp; Thread.interrupted())</span>
+<span class="nc" id="L63">                    throw new IllegalStateException(&quot;Interrupted&quot;);</span>
+<span class="nc" id="L64">                pauser.pause(timeout, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L65">                value = lock.getVolatileValue();</span>
+            }
+<span class="nc" id="L67">        } catch (TimeoutException e) {</span>
+<span class="nc" id="L68">            warnLock(&quot;Overriding the lock. Couldn't acquire lock&quot;, value);</span>
+<span class="nc" id="L69">            forceUnlock(value);</span>
+<span class="nc" id="L70">            acquireLock();</span>
+        } finally {
+<span class="nc" id="L72">            pauser.reset();</span>
+        }
+<span class="nc" id="L74">    }</span>
+
+    private long getLockValueFromTid(long tid) {
+<span class="nc" id="L77">        return tid &lt;&lt; 32 | PID;</span>
+    }
+
+    /**
+     * checks if current thread holds lock. If not, it will wait for four times &lt;code&gt;chronicle.queue.lock.timeoutMS&lt;/code&gt; millis for the lock to be
+     * released, and if it is not after timeout, throws {@link IllegalStateException}.
+     */
+    // TODO combine logic for acquireLock with this method so recovery is consistent.
+    @Override
+    public void waitForLock() {
+<span class="nc" id="L87">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L89">        long tid = Thread.currentThread().getId();</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (isLockHeldByCurrentThread(tid))</span>
+<span class="nc" id="L91">            return;</span>
+
+<span class="nc" id="L93">        long value = lock.getVolatileValue();</span>
+        try {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            while (value!=UNLOCKED) {</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                if (Thread.interrupted())</span>
+<span class="nc" id="L97">                    throw new IllegalStateException(&quot;Interrupted&quot;);</span>
+<span class="nc" id="L98">                pauser.pause(timeout, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L99">                value = lock.getVolatileValue();</span>
+            }
+<span class="nc" id="L101">        } catch (TimeoutException e) {</span>
+<span class="nc" id="L102">            warnLock(&quot;Queue lock is still held&quot;, value);</span>
+<span class="nc" id="L103">            forceUnlock(value);</span>
+            // try again.
+<span class="nc" id="L105">            waitForLock();</span>
+
+<span class="nc" id="L107">        } catch (NullPointerException ex) {</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">            if (!tableStore.isClosed())</span>
+<span class="nc" id="L109">                throw ex;</span>
+<span class="nc" id="L110">            throw new IllegalStateException(&quot;The table store is closed!&quot;, ex);</span>
+        } finally {
+<span class="nc" id="L112">            pauser.reset();</span>
+        }
+<span class="nc" id="L114">    }</span>
+
+    private void warnLock(String msg, long value) {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        String pid = ((int) value==PID) ? &quot;me&quot;:Integer.toString((int) value);</span>
+<span class="nc" id="L118">        final String warningMsg = msg + &quot; after &quot; + timeout + &quot;ms for &quot; +</span>
+                &quot;the lock file:&quot; + path + &quot;. Lock is held by &quot; +
+                &quot;PID: &quot; + pid + &quot;, &quot; +
+                &quot;TID: &quot; + (int) (value &gt;&gt;&gt; 32);
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (dontRecoverLockTimeout)</span>
+<span class="nc" id="L123">            throw new UnrecoverableTimeoutException(new IllegalStateException(warningMsg));</span>
+<span class="nc" id="L124">        warn().on(getClass(), warningMsg + &quot;. Unlocking forcibly&quot;);</span>
+<span class="nc" id="L125">    }</span>
+
+    /**
+     * Checks if the lock is held by current thread and if so, releases it, removing entry from TableStore and clearing ThreadLocal state, allowing
+     * anyone to proceed with {@link net.openhft.chronicle.queue.ChronicleQueue#acquireAppender}.  If it is already unlocked, no action is taken.
+     */
+    @Override
+    public void unlock() {
+<span class="nc" id="L133">        throwExceptionIfClosed();</span>
+<span class="nc" id="L134">        final long tid = Thread.currentThread().getId();</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (!lock.compareAndSwapValue(getLockValueFromTid(tid), UNLOCKED)) {</span>
+<span class="nc" id="L136">            warn().on(getClass(), &quot;Queue lock was locked by another thread, currentID=&quot; + tid + &quot;, lock-tid=&quot; + lock.getVolatileValue()+&quot; so this lock was not removed.&quot;);</span>
+        }
+<span class="nc" id="L138">    }</span>
+
+    /**
+     * unlike {@link TSQueueLock#unlock()} this method will not WARN if already unlocked
+     */
+    public void quietUnlock() {
+<span class="nc" id="L144">        throwExceptionIfClosed();</span>
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (lockedBy()!=UNLOCKED) {</span>
+<span class="nc" id="L147">            final long tid = Thread.currentThread().getId();</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (!lock.compareAndSwapValue(getLockValueFromTid(tid), UNLOCKED)) {</span>
+<span class="nc" id="L149">                final long value = lock.getVolatileValue();</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                if (value == UNLOCKED)</span>
+<span class="nc" id="L151">                    return;</span>
+<span class="nc" id="L152">                warn().on(getClass(), &quot;Queue lock was locked by another thread, current-thread-tid=&quot; + tid + &quot;, lock value=&quot; + value+&quot;, this lock was not removed.&quot;);</span>
+            }
+        }
+<span class="nc" id="L155">    }</span>
+
+    private boolean isLockHeldByCurrentThread(long tid) {
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        return lock.getVolatileValue()==getLockValueFromTid(tid);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

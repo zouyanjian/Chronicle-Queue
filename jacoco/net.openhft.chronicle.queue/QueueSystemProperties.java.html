@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QueueSystemProperties.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue</a> &gt; <span class="el_source">QueueSystemProperties.java</span></div><h1>QueueSystemProperties.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue;
+
+import net.openhft.chronicle.core.Jvm;
+
+public final class QueueSystemProperties {
+
+    private QueueSystemProperties() {
+    }
+
+    /**
+     * Returns if Chronicle Queue shall assert certain index invariants on various
+     * occasions throughout the code. Setting this property to &quot;&quot;, &quot;yes&quot; or &quot;true&quot;
+     * will enable this feature. Enabling the feature will slow down execution if
+     * assertions (-ea) are enabled.
+     * &lt;p&gt;
+     * System Property key: &quot;queue.check.index&quot;
+     * Default unset value: false
+     * Activation values  : &quot;&quot;, &quot;yes&quot;, or &quot;true&quot;
+     */
+<span class="fc" id="L20">    public static final boolean CHECK_INDEX = Jvm.getBoolean(&quot;queue.check.index&quot;);</span>
+
+    /**
+     * Name of a system property used to specify the default roll cycle.
+     * &lt;p&gt;
+     * System Property key: &quot;net.openhft.queue.builder.defaultRollCycle&quot;
+     * Default unset value: net.openhft.chronicle.queue.RollCycles.DEFAULT
+     * Valid values       : Any name of an entity implementing RollCycle such as &quot;net.openhft.chronicle.queue.RollCycles.MINUTELY&quot;
+     */
+    public static final String DEFAULT_ROLL_CYCLE_PROPERTY = &quot;net.openhft.queue.builder.defaultRollCycle&quot;;
+
+    /**
+     * Name of a system property used to specify the default epoch offset property.
+     * &lt;p&gt;
+     * System Property key: &quot;net.openhft.queue.builder.defaultEpoch&quot;
+     * Default unset value: 0L
+     * Valid values       : Any long value
+     */
+    public static final String DEFAULT_EPOCH_PROPERTY = &quot;net.openhft.queue.builder.defaultEpoch&quot;;
+
+    // The name space of the system properties should be managed. Eg. map.x.y, queue.a.b
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

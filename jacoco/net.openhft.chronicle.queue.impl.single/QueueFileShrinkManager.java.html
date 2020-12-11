@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QueueFileShrinkManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">QueueFileShrinkManager.java</span></div><h1>QueueFileShrinkManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2014-2020 chronicle.software
+ *
+ * http://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.threads.Threads;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+<span class="fc" id="L33">public enum QueueFileShrinkManager {</span>
+    ;
+    public static final String THREAD_NAME = &quot;queue~file~shrink~daemon&quot;;
+    // don't use this with a Pretoucher enabled!
+<span class="fc" id="L37">    public static final boolean RUN_SYNCHRONOUSLY = Jvm.getBoolean(&quot;chronicle.queue.synchronousFileShrinking&quot;);</span>
+<span class="pc bpc" id="L38" title="1 of 4 branches missed.">    public static final boolean DISABLE_QUEUE_FILE_SHRINKING = OS.isWindows() || Jvm.getBoolean(&quot;chronicle.queue.disableFileShrinking&quot;);</span>
+
+<span class="fc" id="L40">    private static final Logger LOG = LoggerFactory.getLogger(QueueFileShrinkManager.class);</span>
+<span class="fc" id="L41">    private static final ScheduledExecutorService EXECUTOR = Threads.acquireScheduledExecutorService(THREAD_NAME, true);</span>
+    private static final long DELAY_S = 10;
+
+    public static void scheduleShrinking(@NotNull final File queueFile, final long writePos) {
+<span class="fc bfc" id="L45" title="All 2 branches covered.">        if (DISABLE_QUEUE_FILE_SHRINKING)</span>
+<span class="fc" id="L46">            return;</span>
+<span class="fc bfc" id="L47" title="All 2 branches covered.">        if (RUN_SYNCHRONOUSLY)</span>
+<span class="fc" id="L48">            task(queueFile, writePos);</span>
+        else {
+            // The shrink is deferred a bit to allow any potentially lagging tailers/pre-touchers
+            // to move on to the next roll before the file can be safely shrunk.
+            // See https://github.com/ChronicleEnterprise/Chronicle-Queue-Enterprise/issues/103
+<span class="fc" id="L53">            EXECUTOR.schedule(() -&gt; task(queueFile, writePos), DELAY_S, TimeUnit.SECONDS);</span>
+        }
+<span class="fc" id="L55"> }</span>
+
+    private static void task(@NotNull final File queueFile, final long writePos) {
+<span class="pc bpc" id="L58" title="1 of 2 branches missed.">        if (LOG.isDebugEnabled())</span>
+<span class="nc" id="L59">            LOG.debug(&quot;Shrinking {} to {}&quot;, queueFile, writePos);</span>
+<span class="fc" id="L60">        int timeout = 50;</span>
+<span class="pc bpc" id="L61" title="2 of 4 branches missed.">        for (int i = OS.isWindows() ? 1 : 3; i &gt;= 0; i--) {</span>
+<span class="pc bpc" id="L62" title="1 of 2 branches missed.">            if (!queueFile.exists()) {</span>
+<span class="nc" id="L63">                LOG.warn(&quot;Failed to shrink file as it exists no longer, file=&quot; + queueFile);</span>
+<span class="nc" id="L64">                return;</span>
+            }
+<span class="fc" id="L66">            try (RandomAccessFile raf = new RandomAccessFile(queueFile, &quot;rw&quot;)) {</span>
+<span class="fc" id="L67">                raf.setLength(writePos);</span>
+
+<span class="nc" id="L69">            } catch (IOException ex) {</span>
+                // on microsoft windows, keep retrying until the file is unmapped
+<span class="nc bnc" id="L71" title="All 2 branches missed.">                if (ex.getMessage().contains(&quot;The requested operation cannot be performed on a file with a user-mapped section open&quot;)) {</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                    LOG.debug(&quot;Failed to shrinking {} to {}, {}&quot;, queueFile, writePos, i == 0 ? &quot;giving up&quot; : &quot;retrying&quot;);</span>
+<span class="nc" id="L73">                    Jvm.pause(timeout);</span>
+<span class="nc" id="L74">                    timeout *= 2;</span>
+<span class="nc" id="L75">                    continue;</span>
+                }
+<span class="nc" id="L77">                LOG.warn(&quot;Failed to shrink file &quot; + queueFile, ex);</span>
+<span class="fc" id="L78">            }</span>
+<span class="nc" id="L79">            break;</span>
+        }
+<span class="fc" id="L81">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

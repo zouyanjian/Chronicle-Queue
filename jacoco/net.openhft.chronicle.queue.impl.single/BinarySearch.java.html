@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BinarySearch.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">BinarySearch.java</span></div><h1>BinarySearch.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.RollCycle;
+import net.openhft.chronicle.wire.DocumentContext;
+import net.openhft.chronicle.wire.Wire;
+import org.jetbrains.annotations.NotNull;
+
+import java.text.ParseException;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.NavigableSet;
+
+<span class="pc bpc" id="L15" title="1 of 2 branches missed.">public enum BinarySearch {</span>
+<span class="fc" id="L16">    INSTANCE;</span>
+
+    /**
+     * returns the index or -1 if not found or the index if an exact match is found, an approximation in the form of -approximateIndex
+     * or -1 if there was no searching to be done.
+     * &lt;p&gt;
+     * Warning : This implementation is unreliable as index are an encoded 64bits, where we could use all the bits including the
+     * high bit which is used for the sign. At the moment  it will work as its unlikely to reach a point where we store
+     * enough messages in the chronicle queue to use the high bit, having said this its possible in the future the
+     * high bit in the index ( used for the sign ) may be used, this implementation is unsafe as it relies on this
+     * bit not being set ( in other words set to zero ).
+     */
+    public static long search(@NotNull SingleChronicleQueue q,
+                              @NotNull Wire key,
+                              @NotNull Comparator&lt;Wire&gt; c) throws ParseException {
+<span class="fc" id="L31">        final long readPosition = key.bytes().readPosition();</span>
+<span class="fc" id="L32">        try (final ExcerptTailer tailer = q.createTailer()) {</span>
+<span class="fc" id="L33">            final long start = tailer.toStart().index();</span>
+<span class="fc" id="L34">            final long end = tailer.toEnd().index();</span>
+
+<span class="fc" id="L36">            final RollCycle rollCycle = q.rollCycle();</span>
+<span class="fc" id="L37">            final int startCycle = rollCycle.toCycle(start);</span>
+<span class="fc" id="L38">            final int endCycle = rollCycle.toCycle(end);</span>
+
+<span class="fc bfc" id="L40" title="All 2 branches covered.">            if (startCycle == endCycle)</span>
+<span class="fc" id="L41">                return findWithinCycle(key, c, startCycle, tailer, q, rollCycle);</span>
+
+<span class="fc" id="L43">            final NavigableSet&lt;Long&gt; cycles = q.listCyclesBetween(startCycle, endCycle);</span>
+<span class="fc" id="L44">            final int cycle = (int) findCycleLinearSearch(cycles, key, c, tailer, q);</span>
+
+<span class="pc bpc" id="L46" title="1 of 2 branches missed.">            if (cycle == -1)</span>
+<span class="nc" id="L47">                return -1;</span>
+<span class="fc" id="L48">            return findWithinCycle(key, c, cycle, tailer, q, rollCycle);</span>
+        } finally {
+<span class="fc" id="L50">            key.bytes().readPosition(readPosition);</span>
+        }
+    }
+
+    private static long findCycleLinearSearch(@NotNull NavigableSet&lt;Long&gt; cycles, Wire key,
+                                              @NotNull Comparator&lt;Wire&gt; c,
+                                              @NotNull ExcerptTailer tailer,
+                                              @NotNull final ChronicleQueue queue) {
+
+<span class="fc" id="L59">        final Iterator&lt;Long&gt; iterator = cycles.iterator();</span>
+<span class="pc bpc" id="L60" title="1 of 2 branches missed.">        if (!iterator.hasNext())</span>
+<span class="nc" id="L61">            return -1;</span>
+<span class="fc" id="L62">        final RollCycle rollCycle = queue.rollCycle();</span>
+<span class="fc" id="L63">        long prevIndex = iterator.next();</span>
+
+<span class="fc bfc" id="L65" title="All 2 branches covered.">        while (iterator.hasNext()) {</span>
+
+<span class="fc" id="L67">            final Long current = iterator.next();</span>
+
+<span class="fc" id="L69">            final boolean b = tailer.moveToIndex(rollCycle.toIndex((int) (long) current, 0));</span>
+<span class="pc bpc" id="L70" title="1 of 2 branches missed.">            if (!b)</span>
+<span class="nc" id="L71">                return prevIndex;</span>
+
+<span class="fc" id="L73">            try (final DocumentContext dc = tailer.readingDocument()) {</span>
+<span class="fc" id="L74">                final int compare = c.compare(dc.wire(), key);</span>
+<span class="fc bfc" id="L75" title="All 2 branches covered.">                if (compare == 0)</span>
+<span class="fc" id="L76">                    return current;</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">                else if (compare &gt; 0)</span>
+<span class="fc" id="L78">                    return prevIndex;</span>
+<span class="fc" id="L79">                prevIndex = current;</span>
+            }
+<span class="fc" id="L81">        }</span>
+
+<span class="fc" id="L83">        return prevIndex;</span>
+    }
+
+    /**
+     * @return The index if an exact match is found, an approximation in the form of -approximateIndex
+     * or a negative number (- the approx index) if there was no searching to be done.
+     * &lt;p&gt;
+     * Warning : This implementation is unreliable as index are an encoded 64bits, where we could use all the bits including the
+     * high bit which is used for the sign. At the moment  it will work as its unlikely to reach a point where we store
+     * enough messages in the chronicle queue to use the high bit, having said this its possible in the future the
+     * high bit in the index ( used for the sign ) may be used, this implementation is unsafe as it relies on this
+     * bit not being set ( in other words set to zero ).
+     */
+    public static long findWithinCycle(@NotNull Wire key,
+                                       @NotNull Comparator&lt;Wire&gt; c,
+                                       int cycle,
+                                       @NotNull ExcerptTailer tailer,
+                                       @NotNull SingleChronicleQueue q,
+                                       @NotNull final RollCycle rollCycle) {
+<span class="fc" id="L102">        final long readPosition = key.bytes().readPosition();</span>
+        try {
+<span class="fc" id="L104">            long lowSeqNum = 0;</span>
+
+<span class="fc" id="L106">            long highSeqNum = q.exceptsPerCycle(cycle) - 1;</span>
+
+            // nothing to search
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">            if (highSeqNum &lt; lowSeqNum)</span>
+<span class="nc" id="L110">                return -1;</span>
+
+<span class="fc" id="L112">            long midIndex = 0;</span>
+
+<span class="fc bfc" id="L114" title="All 2 branches covered.">            while (lowSeqNum &lt;= highSeqNum) {</span>
+<span class="fc" id="L115">                long midSeqNumber = (lowSeqNum + highSeqNum) &gt;&gt;&gt; 1L;</span>
+
+<span class="fc" id="L117">                midIndex = rollCycle.toIndex(cycle, midSeqNumber);</span>
+
+<span class="fc" id="L119">                final boolean b = tailer.moveToIndex(midIndex);</span>
+<span class="pc bpc" id="L120" title="2 of 4 branches missed.">                assert b;</span>
+<span class="fc" id="L121">                try (DocumentContext dc = tailer.readingDocument()) {</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">                    if (!dc.isPresent())</span>
+<span class="nc" id="L123">                        return -1;</span>
+<span class="fc" id="L124">                    key.bytes().readPosition(readPosition);</span>
+<span class="fc" id="L125">                    int cmp = c.compare(dc.wire(), key);</span>
+
+<span class="fc bfc" id="L127" title="All 2 branches covered.">                    if (cmp &lt; 0)</span>
+<span class="fc" id="L128">                        lowSeqNum = midSeqNumber + 1;</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">                    else if (cmp &gt; 0)</span>
+<span class="fc" id="L130">                        highSeqNum = midSeqNumber - 1;</span>
+                    else
+<span class="fc" id="L132">                        return midIndex; // key found</span>
+                }
+<span class="fc" id="L134">            }</span>
+
+<span class="fc bfc" id="L136" title="All 2 branches covered.">            return midIndex == 0 ? -1 : -midIndex;  // -approximateIndex</span>
+        } finally {
+<span class="fc" id="L138">            key.bytes().readPosition(readPosition);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

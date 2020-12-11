@@ -1,0 +1,1121 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleChronicleQueueBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">SingleChronicleQueueBuilder.java</span></div><h1>SingleChronicleQueueBuilder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.BytesRingBufferStats;
+import net.openhft.chronicle.bytes.BytesStore;
+import net.openhft.chronicle.bytes.MappedBytes;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.Maths;
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.core.threads.EventLoop;
+import net.openhft.chronicle.core.threads.HandlerPriority;
+import net.openhft.chronicle.core.threads.OnDemandEventLoop;
+import net.openhft.chronicle.core.time.SystemTimeProvider;
+import net.openhft.chronicle.core.time.TimeProvider;
+import net.openhft.chronicle.core.util.ObjectUtils;
+import net.openhft.chronicle.core.util.ThrowingBiFunction;
+import net.openhft.chronicle.core.util.Updater;
+import net.openhft.chronicle.queue.*;
+import net.openhft.chronicle.queue.impl.RollingChronicleQueue;
+import net.openhft.chronicle.queue.impl.StoreFileListener;
+import net.openhft.chronicle.queue.impl.TableStore;
+import net.openhft.chronicle.queue.impl.WireStoreFactory;
+import net.openhft.chronicle.queue.impl.table.ReadonlyTableStore;
+import net.openhft.chronicle.queue.impl.table.SingleTableBuilder;
+import net.openhft.chronicle.queue.internal.domestic.QueueOffsetSpec;
+import net.openhft.chronicle.threads.MediumEventLoop;
+import net.openhft.chronicle.threads.Pauser;
+import net.openhft.chronicle.threads.TimeoutPauser;
+import net.openhft.chronicle.threads.TimingPauser;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.crypto.spec.SecretKeySpec;
+import java.io.File;
+import java.lang.reflect.Constructor;
+import java.nio.file.Path;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+
+import static net.openhft.chronicle.core.pool.ClassAliasPool.CLASS_ALIASES;
+import static net.openhft.chronicle.queue.ChronicleQueue.TEST_BLOCK_SIZE;
+import static net.openhft.chronicle.queue.impl.single.SingleChronicleQueue.QUEUE_METADATA_FILE;
+import static net.openhft.chronicle.wire.WireType.DEFAULT_ZERO_BINARY;
+import static net.openhft.chronicle.wire.WireType.DELTA_BINARY;
+
+<span class="pc bpc" id="L74" title="1 of 2 branches missed.">public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable implements Cloneable {</span>
+    @Deprecated /* For removal in x.22, Use QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY instead*/
+    public static final String DEFAULT_ROLL_CYCLE_PROPERTY = QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY;
+    private static final Constructor ENTERPRISE_QUEUE_CONSTRUCTOR;
+
+<span class="fc" id="L79">    private static final Logger LOGGER = LoggerFactory.getLogger(SingleChronicleQueueBuilder.class);</span>
+
+<span class="fc" id="L81">    private static final WireStoreFactory storeFactory = SingleChronicleQueueBuilder::createStore;</span>
+<span class="fc" id="L82">    private static final Supplier&lt;TimingPauser&gt; TIMING_PAUSER_SUPPLIER = DefaultPauserSupplier.INSTANCE;</span>
+
+    static {
+<span class="fc" id="L85">        CLASS_ALIASES.addAlias(WireType.class);</span>
+<span class="fc" id="L86">        CLASS_ALIASES.addAlias(SCQMeta.class, &quot;SCQMeta&quot;);</span>
+<span class="fc" id="L87">        CLASS_ALIASES.addAlias(SCQRoll.class, &quot;SCQSRoll&quot;);</span>
+<span class="fc" id="L88">        CLASS_ALIASES.addAlias(SCQIndexing.class, &quot;SCQSIndexing&quot;);</span>
+<span class="fc" id="L89">        CLASS_ALIASES.addAlias(SingleChronicleQueueStore.class, &quot;SCQStore&quot;);</span>
+
+        {
+            Constructor co;
+            try {
+<span class="nc" id="L94">                co = ((Class) Class.forName(&quot;software.chronicle.enterprise.queue.EnterpriseSingleChronicleQueue&quot;)).getDeclaredConstructors()[0];</span>
+<span class="nc" id="L95">                Jvm.setAccessible(co);</span>
+<span class="fc" id="L96">            } catch (Exception e) {</span>
+<span class="fc" id="L97">                co = null;</span>
+<span class="nc" id="L98">            }</span>
+<span class="fc" id="L99">            ENTERPRISE_QUEUE_CONSTRUCTOR = co;</span>
+        }
+<span class="fc" id="L101">    }</span>
+
+<span class="fc" id="L103">    private BufferMode writeBufferMode = BufferMode.None;</span>
+<span class="fc" id="L104">    private BufferMode readBufferMode = BufferMode.None;</span>
+<span class="fc" id="L105">    private WireType wireType = WireType.BINARY_LIGHT;</span>
+    private Long blockSize;
+    private File path;
+    private RollCycle rollCycle;
+    private Long epoch; // default is 1970-01-01 00:00:00.000 UTC
+    private Long bufferCapacity;
+    private Integer indexSpacing;
+    private Integer indexCount;
+    private Boolean enableRingBufferMonitoring;
+    private Boolean ringBufferReaderCanDrain;
+    private Boolean ringBufferForceCreateReader;
+    private Boolean ringBufferReopenReader;
+    private Supplier&lt;Pauser&gt; ringBufferPauserSupplier;
+    private HandlerPriority drainerPriority;
+<span class="fc" id="L119">    private int drainerTimeoutMS = -1;</span>
+
+    @Nullable
+    private EventLoop eventLoop;
+    /**
+     * by default does not log any stats of the ring buffer
+     */
+    private Consumer&lt;BytesRingBufferStats&gt; onRingBufferStats;
+    private TimeProvider timeProvider;
+    private Supplier&lt;TimingPauser&gt; pauserSupplier;
+    private Long timeoutMS; // 10 seconds.
+    private Integer sourceId;
+    private StoreFileListener storeFileListener;
+
+    private Boolean readOnly;
+    private Boolean strongAppenders;
+    private boolean checkInterrupts;
+
+    private transient TableStore&lt;SCQMeta&gt; metaStore;
+
+    // enterprise stuff
+<span class="fc" id="L140">    private int deltaCheckpointInterval = -1;</span>
+    private Supplier&lt;BiConsumer&lt;BytesStore, Bytes&gt;&gt; encodingSupplier;
+    private Supplier&lt;BiConsumer&lt;BytesStore, Bytes&gt;&gt; decodingSupplier;
+    private Updater&lt;Bytes&gt; messageInitializer;
+    private Consumer&lt;Bytes&gt; messageHeaderReader;
+    private SecretKeySpec key;
+
+    private int maxTailers;
+    private ThrowingBiFunction&lt;Long, Integer, BytesStore, Exception&gt; bufferBytesStoreCreator;
+    private Long pretouchIntervalMillis;
+    private LocalTime rollTime;
+    private ZoneId rollTimeZone;
+    private QueueOffsetSpec queueOffsetSpec;
+    private boolean doubleBuffer;
+
+<span class="fc" id="L155">    protected SingleChronicleQueueBuilder() {</span>
+<span class="fc" id="L156">    }</span>
+    /*
+     * ========================
+     * Builders
+     * ========================
+     */
+
+    public static void addAliases() {
+        // static initialiser.
+<span class="fc" id="L165">    }</span>
+
+    /**
+     * @return an empty builder
+     */
+    public static SingleChronicleQueueBuilder builder() {
+<span class="fc" id="L171">        return new SingleChronicleQueueBuilder();</span>
+    }
+
+    @NotNull
+    public static SingleChronicleQueueBuilder builder(@NotNull Path path, @NotNull WireType wireType) {
+<span class="fc" id="L176">        return builder(path.toFile(), wireType);</span>
+    }
+
+    @NotNull
+    public static SingleChronicleQueueBuilder builder(@NotNull File file, @NotNull WireType wireType) {
+<span class="fc" id="L181">        SingleChronicleQueueBuilder result = builder().wireType(wireType);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">        if (file.isFile()) {</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">            if (!file.getName().endsWith(SingleChronicleQueue.SUFFIX)) {</span>
+<span class="fc" id="L184">                throw new IllegalArgumentException(&quot;Invalid file type: &quot; + file.getName());</span>
+            }
+
+<span class="fc" id="L187">            LOGGER.warn(&quot;Queues should be configured with the queue directory, not a specific filename. Actual file used: {}&quot;,</span>
+<span class="fc" id="L188">                    file.getParentFile());</span>
+
+<span class="fc" id="L190">            result.path(file.getParentFile());</span>
+        } else
+<span class="fc" id="L192">            result.path(file);</span>
+
+<span class="fc" id="L194">        return result;</span>
+    }
+
+    public static SingleChronicleQueueBuilder single() {
+<span class="nc" id="L198">        SingleChronicleQueueBuilder builder = builder();</span>
+<span class="nc" id="L199">        builder.wireType(WireType.BINARY_LIGHT);</span>
+<span class="nc" id="L200">        return builder;</span>
+    }
+
+    public static SingleChronicleQueueBuilder single(@NotNull String basePath) {
+<span class="fc" id="L204">        return binary(basePath);</span>
+    }
+
+    public static SingleChronicleQueueBuilder single(@NotNull File basePath) {
+<span class="fc" id="L208">        return binary(basePath);</span>
+    }
+
+    public static SingleChronicleQueueBuilder binary(@NotNull Path path) {
+<span class="fc" id="L212">        return binary(path.toFile());</span>
+    }
+
+    public static SingleChronicleQueueBuilder binary(@NotNull String basePath) {
+<span class="fc" id="L216">        return binary(new File(basePath));</span>
+    }
+
+    public static SingleChronicleQueueBuilder binary(@NotNull File basePathFile) {
+<span class="fc" id="L220">        return builder(basePathFile, WireType.BINARY_LIGHT);</span>
+    }
+
+    public static SingleChronicleQueueBuilder fieldlessBinary(@NotNull File name) {
+<span class="fc" id="L224">        return builder(name, WireType.FIELDLESS_BINARY);</span>
+    }
+
+    public static SingleChronicleQueueBuilder defaultZeroBinary(@NotNull File basePathFile) {
+<span class="nc" id="L228">        return builder(basePathFile, DEFAULT_ZERO_BINARY);</span>
+    }
+
+    public static SingleChronicleQueueBuilder deltaBinary(@NotNull File basePathFile) {
+<span class="nc" id="L232">        return builder(basePathFile, DELTA_BINARY);</span>
+    }
+
+    /**
+     * @param name               the file name
+     * @param deltaIntervalShift default value of 6, the shift for deltaInterval, the should be a
+     *                           number between 0-63 ( inclusive ), default the delta messaging is
+     *                           check pointed every 64 messages, so the default {@code
+     *                           deltaIntervalShift  == 6}, as {@code 1 &lt;&lt; 6 == 64 }
+     * @return the SingleChronicleQueueBuilder
+     */
+    public static SingleChronicleQueueBuilder deltaBinary(@NotNull File name, byte deltaIntervalShift) {
+<span class="nc" id="L244">        @NotNull SingleChronicleQueueBuilder ret = deltaBinary(name);</span>
+
+<span class="nc bnc" id="L246" title="All 4 branches missed.">        if (deltaIntervalShift &lt; 0 || deltaIntervalShift &gt; 63)</span>
+<span class="nc" id="L247">            throw new IllegalArgumentException(&quot;deltaIntervalShift=&quot; + deltaIntervalShift + &quot;, but &quot; +</span>
+                    &quot;should be a value between 0-63 inclusive&quot;);
+
+<span class="nc" id="L250">        ret.deltaCheckpointInterval(1 &lt;&lt; deltaIntervalShift);</span>
+<span class="nc" id="L251">        return ret;</span>
+    }
+
+    @NotNull
+    static SingleChronicleQueueStore createStore(@NotNull RollingChronicleQueue queue,
+                                                 @NotNull Wire wire) {
+<span class="fc" id="L257">        MappedBytes mappedBytes = (MappedBytes) wire.bytes();</span>
+<span class="fc" id="L258">        final SingleChronicleQueueStore wireStore = new SingleChronicleQueueStore(</span>
+<span class="fc" id="L259">                queue.rollCycle(),</span>
+<span class="fc" id="L260">                queue.wireType(),</span>
+                mappedBytes,
+<span class="fc" id="L262">                queue.indexCount(),</span>
+<span class="fc" id="L263">                queue.indexSpacing());</span>
+
+<span class="fc" id="L265">        wire.writeEventName(MetaDataKeys.header).typedMarshallable(wireStore);</span>
+<span class="fc" id="L266">        return wireStore;</span>
+    }
+
+    private static boolean isQueueReplicationAvailable() {
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">        return ENTERPRISE_QUEUE_CONSTRUCTOR != null;</span>
+    }
+
+    private static RollCycle loadDefaultRollCycle() {
+<span class="fc bfc" id="L274" title="All 2 branches covered.">        if (null == System.getProperty(QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY)) {</span>
+<span class="fc" id="L275">            return RollCycles.DEFAULT;</span>
+        }
+
+<span class="fc" id="L278">        String rollCycleProperty = System.getProperty(QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY);</span>
+<span class="fc" id="L279">        String[] rollCyclePropertyParts = rollCycleProperty.split(&quot;:&quot;);</span>
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">        if (rollCyclePropertyParts.length &gt; 0) {</span>
+            try {
+<span class="fc" id="L282">                Class rollCycleClass = Class.forName(rollCyclePropertyParts[0]);</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">                if (Enum.class.isAssignableFrom(rollCycleClass)) {</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">                    if (rollCyclePropertyParts.length &lt; 2) {</span>
+<span class="nc" id="L285">                        LOGGER.warn(&quot;Default roll cycle configured as enum, but enum value not specified: &quot; + rollCycleProperty);</span>
+                    } else {
+                        @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L288">                        Class&lt;Enum&gt; eClass = (Class&lt;Enum&gt;) rollCycleClass;</span>
+<span class="fc" id="L289">                        Object instance = ObjectUtils.valueOf(eClass, rollCyclePropertyParts[1]);</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">                        if (instance instanceof RollCycle) {</span>
+<span class="fc" id="L291">                            return (RollCycle) instance;</span>
+                        } else {
+<span class="nc" id="L293">                            LOGGER.warn(&quot;Configured default rollcycle is not a subclass of RollCycle&quot;);</span>
+                        }
+<span class="nc" id="L295">                    }</span>
+                } else {
+<span class="fc" id="L297">                    Object instance = ObjectUtils.newInstance(rollCycleClass);</span>
+<span class="fc bfc" id="L298" title="All 2 branches covered.">                    if (instance instanceof RollCycle) {</span>
+<span class="fc" id="L299">                        return (RollCycle) instance;</span>
+                    } else {
+<span class="fc" id="L301">                        LOGGER.warn(&quot;Configured default rollcycle is not a subclass of RollCycle&quot;);</span>
+                    }
+                }
+<span class="fc" id="L304">            } catch (ClassNotFoundException ignored) {</span>
+<span class="fc" id="L305">                LOGGER.warn(&quot;Default roll cycle class: &quot; + rollCyclePropertyParts[0] + &quot; was not found&quot;);</span>
+<span class="fc" id="L306">            }</span>
+        }
+
+<span class="fc" id="L309">        return RollCycles.DEFAULT;</span>
+    }
+
+    public WireStoreFactory storeFactory() {
+<span class="fc" id="L313">        return storeFactory;</span>
+    }
+
+    @NotNull
+    public SingleChronicleQueue build() {
+<span class="fc" id="L318">        boolean needEnterprise = checkEnterpriseFeaturesRequested();</span>
+<span class="fc" id="L319">        preBuild();</span>
+
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">        if (needEnterprise)</span>
+<span class="nc" id="L322">            return buildEnterprise();</span>
+
+<span class="fc" id="L324">        return new SingleChronicleQueue(this);</span>
+    }
+
+    private boolean checkEnterpriseFeaturesRequested() {
+
+<span class="fc" id="L329">        boolean result = false;</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">        if (readBufferMode != BufferMode.None)</span>
+<span class="nc" id="L331">            result = onlyAvailableInEnterprise(&quot;Buffering&quot;);</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (writeBufferMode != BufferMode.None)</span>
+<span class="nc" id="L333">            result = onlyAvailableInEnterprise(&quot;Buffering&quot;);</span>
+<span class="pc bpc" id="L334" title="1 of 6 branches missed.">        if (rollTimeZone != null &amp;&amp; !rollTimeZone.getId().equals(&quot;UTC&quot;) &amp;&amp; !rollTimeZone.getId().equals(&quot;Z&quot;))</span>
+<span class="nc" id="L335">            result = onlyAvailableInEnterprise(&quot;Non-UTC roll time zone&quot;);</span>
+<span class="pc bpc" id="L336" title="1 of 2 branches missed.">        if (wireType == WireType.DELTA_BINARY)</span>
+<span class="nc" id="L337">            result = onlyAvailableInEnterprise(&quot;Wire type &quot; + wireType.name());</span>
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">        if (encodingSupplier != null)</span>
+<span class="nc" id="L339">            result = onlyAvailableInEnterprise(&quot;Encoding&quot;);</span>
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">        if (key != null)</span>
+<span class="nc" id="L341">            result = onlyAvailableInEnterprise(&quot;Encryption&quot;);</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">        if (hasPretouchIntervalMillis())</span>
+<span class="nc" id="L343">            result = onlyAvailableInEnterprise(&quot;Out of process pretouching&quot;);</span>
+
+<span class="fc" id="L345">        return result;</span>
+    }
+
+    private boolean onlyAvailableInEnterprise(final String feature) {
+<span class="nc bnc" id="L349" title="All 2 branches missed.">        if (ENTERPRISE_QUEUE_CONSTRUCTOR == null)</span>
+<span class="nc" id="L350">            LOGGER.warn(feature + &quot; is only supported in Chronicle Queue Enterprise. If you would like to use this feature, please contact sales@chronicle.software for more information.&quot;);</span>
+<span class="nc" id="L351">        return true;</span>
+    }
+
+    @NotNull
+    private SingleChronicleQueue buildEnterprise() {
+<span class="nc bnc" id="L356" title="All 2 branches missed.">        if (ENTERPRISE_QUEUE_CONSTRUCTOR == null)</span>
+<span class="nc" id="L357">            throw new IllegalStateException(&quot;Enterprise features requested but Chronicle Queue Enterprise is not in the class path!&quot;);</span>
+
+        try {
+<span class="nc" id="L360">            return (SingleChronicleQueue) ENTERPRISE_QUEUE_CONSTRUCTOR.newInstance(this);</span>
+<span class="nc" id="L361">        } catch (Exception e) {</span>
+<span class="nc" id="L362">            throw new IllegalStateException(&quot;Couldn't create an instance of Enterprise queue&quot;, e);</span>
+        }
+    }
+
+    public SingleChronicleQueueBuilder aesEncryption(@Nullable byte[] keyBytes) {
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        if (keyBytes == null) {</span>
+<span class="nc" id="L368">            codingSuppliers(null, null);</span>
+<span class="nc" id="L369">            return this;</span>
+        }
+<span class="nc" id="L371">        key = new SecretKeySpec(keyBytes, &quot;AES&quot;);</span>
+<span class="nc" id="L372">        return this;</span>
+    }
+
+    public Updater&lt;Bytes&gt; messageInitializer() {
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        return messageInitializer == null ? Bytes::clear : messageInitializer;</span>
+    }
+
+    public Consumer&lt;Bytes&gt; messageHeaderReader() {
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        return messageHeaderReader == null ? b -&gt; {</span>
+<span class="nc" id="L381">        } : messageHeaderReader;</span>
+    }
+
+    public SingleChronicleQueueBuilder messageHeader(Updater&lt;Bytes&gt; messageInitializer,
+                                                     Consumer&lt;Bytes&gt; messageHeaderReader) {
+<span class="nc" id="L386">        this.messageInitializer = messageInitializer;</span>
+<span class="nc" id="L387">        this.messageHeaderReader = messageHeaderReader;</span>
+<span class="nc" id="L388">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder rollTime(@NotNull final LocalTime rollTime) {
+<span class="nc" id="L392">        rollTime(rollTime, rollTimeZone);</span>
+<span class="nc" id="L393">        return this;</span>
+    }
+
+    public ZoneId rollTimeZone() {
+<span class="fc" id="L397">        return rollTimeZone;</span>
+    }
+
+    public SingleChronicleQueueBuilder rollTimeZone(@NotNull final ZoneId rollTimeZone) {
+<span class="nc" id="L401">        rollTime(rollTime, rollTimeZone);</span>
+<span class="nc" id="L402">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder rollTime(@NotNull final LocalTime rollTime, @NotNull final ZoneId zoneId) {
+<span class="fc" id="L406">        this.rollTime = rollTime;</span>
+<span class="fc" id="L407">        this.rollTimeZone = zoneId;</span>
+<span class="fc" id="L408">        this.epoch = TimeUnit.SECONDS.toMillis(rollTime.toSecondOfDay());</span>
+<span class="fc" id="L409">        this.queueOffsetSpec = QueueOffsetSpec.ofRollTime(rollTime, zoneId);</span>
+<span class="fc" id="L410">        return this;</span>
+    }
+
+    protected void initializeMetadata() {
+<span class="fc" id="L414">        File metapath = metapath();</span>
+<span class="fc" id="L415">        validateRollCycle(metapath);</span>
+<span class="fc" id="L416">        SCQMeta metadata = new SCQMeta(new SCQRoll(rollCycle(), epoch(), rollTime, rollTimeZone), deltaCheckpointInterval(),</span>
+<span class="fc" id="L417">                sourceId());</span>
+        try {
+
+<span class="fc" id="L420">            boolean readOnly = readOnly();</span>
+<span class="fc" id="L421">            metaStore = SingleTableBuilder.binary(metapath, metadata).readOnly(readOnly).build();</span>
+            // check if metadata was overridden
+<span class="fc" id="L423">            SCQMeta newMeta = metaStore.metadata();</span>
+<span class="fc" id="L424">            sourceId(newMeta.sourceId());</span>
+
+<span class="fc" id="L426">            String format = newMeta.roll().format();</span>
+<span class="fc bfc" id="L427" title="All 2 branches covered.">            if (!format.equals(rollCycle().format())) {</span>
+                // roll cycle changed
+<span class="fc" id="L429">                overrideRollCycleForFileName(format);</span>
+            }
+
+            // if it was overridden - reset
+<span class="fc" id="L433">            rollTime = newMeta.roll().rollTime();</span>
+<span class="fc" id="L434">            rollTimeZone = newMeta.roll().rollTimeZone();</span>
+<span class="fc" id="L435">            epoch = newMeta.roll().epoch();</span>
+<span class="fc" id="L436">        } catch (IORuntimeException ex) {</span>
+            // readonly=true and file doesn't exist
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">            if (OS.isWindows())</span>
+<span class="nc" id="L439">                throw ex; // we cant have a read-only table store on windows so we have no option but to throw the ex.</span>
+<span class="fc" id="L440">            Jvm.warn().on(getClass(), &quot;Failback to readonly tablestore&quot;, ex);</span>
+<span class="fc" id="L441">            metaStore = new ReadonlyTableStore&lt;&gt;(metadata);</span>
+<span class="fc" id="L442">        }</span>
+<span class="fc" id="L443">    }</span>
+
+    private void validateRollCycle(File metapath) {
+<span class="fc bfc" id="L446" title="All 2 branches covered.">        if (!metapath.exists()) {</span>
+            // no metadata, so we need to check if there're cq4 files and if so try to validate roll cycle
+            // the code is slightly brutal and crude but should work for most cases. It will NOT work if files were created with
+            // the following cycles: LARGE_HOURLY_SPARSE LARGE_HOURLY_XSPARSE LARGE_DAILY XLARGE_DAILY HUGE_DAILY HUGE_DAILY_XSPARSE
+            // for such cases user MUST use correct roll cycle when creating the queue
+<span class="fc" id="L451">            String[] list = path.list((d, name) -&gt; name.endsWith(SingleChronicleQueue.SUFFIX));</span>
+<span class="fc bfc" id="L452" title="All 4 branches covered.">            if (list != null &amp;&amp; list.length &gt; 0) {</span>
+<span class="fc" id="L453">                String filename = list[0];</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">                for (RollCycles cycle : RollCycles.all()) {</span>
+                    try {
+<span class="fc" id="L456">                        DateTimeFormatter.ofPattern(cycle.format())</span>
+<span class="fc" id="L457">                                .parse(filename.substring(0, filename.length() - 4));</span>
+<span class="fc" id="L458">                        overrideRollCycle(cycle);</span>
+<span class="fc" id="L459">                    } catch (Exception expected) {</span>
+<span class="fc" id="L460">                    }</span>
+<span class="fc" id="L461">                }</span>
+            }
+        }
+<span class="fc" id="L464">    }</span>
+
+    private void overrideRollCycleForFileName(String pattern) {
+<span class="fc bfc" id="L467" title="All 2 branches covered.">        for (RollCycles cycle : RollCycles.all()) {</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">            if (cycle.format().equals(pattern)) {</span>
+<span class="fc" id="L469">                overrideRollCycle(cycle);</span>
+<span class="fc" id="L470">                return;</span>
+            }
+<span class="fc" id="L472">        }</span>
+<span class="fc" id="L473">        throw new IllegalStateException(&quot;Can't find an appropriate RollCycles to override to of length &quot; + pattern);</span>
+    }
+
+    private void overrideRollCycle(RollCycles cycle) {
+<span class="fc" id="L477">        LOGGER.warn(&quot;Overriding roll cycle from {} to {}&quot;, rollCycle, cycle);</span>
+<span class="fc" id="L478">        rollCycle = cycle;</span>
+<span class="fc" id="L479">    }</span>
+
+    private File metapath() {
+        final File storeFilePath;
+<span class="fc bfc" id="L483" title="All 2 branches covered.">        if (&quot;&quot;.equals(path.getPath())) {</span>
+<span class="fc" id="L484">            storeFilePath = new File(QUEUE_METADATA_FILE);</span>
+        } else {
+<span class="fc" id="L486">            storeFilePath = new File(path, QUEUE_METADATA_FILE);</span>
+<span class="fc" id="L487">            path.mkdirs();</span>
+        }
+<span class="fc" id="L489">        return storeFilePath;</span>
+    }
+
+    @NotNull
+    QueueLock queueLock() {
+<span class="pc bpc" id="L494" title="3 of 4 branches missed.">        return isQueueReplicationAvailable() &amp;&amp; !readOnly() ? new TSQueueLock(metaStore, pauserSupplier(), timeoutMS() * 3 / 2) : new NoopQueueLock();</span>
+    }
+
+    @NotNull
+    WriteLock writeLock() {
+<span class="fc bfc" id="L499" title="All 2 branches covered.">        return readOnly() ? new ReadOnlyWriteLock() : new TableStoreWriteLock(metaStore, pauserSupplier(), timeoutMS() * 3 / 2);</span>
+    }
+
+    public int deltaCheckpointInterval() {
+<span class="pc bpc" id="L503" title="1 of 2 branches missed.">        return deltaCheckpointInterval == -1 ? 64 : deltaCheckpointInterval;</span>
+    }
+
+    public QueueOffsetSpec queueOffsetSpec() {
+<span class="nc bnc" id="L507" title="All 2 branches missed.">        return queueOffsetSpec == null ? QueueOffsetSpec.ofNone() : queueOffsetSpec;</span>
+    }
+
+    TableStore&lt;SCQMeta&gt; metaStore() {
+<span class="fc" id="L511">        return metaStore;</span>
+    }
+
+    /**
+     * RingBuffer tailers need to be preallocated. Only set this if using readBufferMode=Asynchronous.
+     * By default 1 tailer will be created for the user.
+     *
+     * @param maxTailers number of tailers that will be required from this queue, not including the draining tailer
+     * @return this
+     */
+    public SingleChronicleQueueBuilder maxTailers(int maxTailers) {
+<span class="nc" id="L522">        this.maxTailers = maxTailers;</span>
+<span class="nc" id="L523">        return this;</span>
+    }
+
+    /**
+     * maxTailers
+     *
+     * @return number of tailers that will be required from this queue, not including the draining tailer
+     */
+    public int maxTailers() {
+<span class="nc" id="L532">        return maxTailers;</span>
+    }
+
+    public SingleChronicleQueueBuilder bufferBytesStoreCreator(ThrowingBiFunction&lt;Long, Integer, BytesStore, Exception&gt; bufferBytesStoreCreator) {
+<span class="nc" id="L536">        this.bufferBytesStoreCreator = bufferBytesStoreCreator;</span>
+<span class="nc" id="L537">        return this;</span>
+    }
+
+    /**
+     * Creator for BytesStore for underlying ring buffer. Allows visibility of RB's data to be controlled.
+     * See also EnterpriseSingleChronicleQueue.RB_BYTES_STORE_CREATOR_NATIVE, EnterpriseSingleChronicleQueue.RB_BYTES_STORE_CREATOR_MAPPED_FILE
+     *
+     * @return bufferBytesStoreCreator
+     */
+    @Nullable
+    public ThrowingBiFunction&lt;Long, Integer, BytesStore, Exception&gt; bufferBytesStoreCreator() {
+<span class="nc" id="L548">        return bufferBytesStoreCreator;</span>
+    }
+
+    /**
+     * Enable out-of-process pretoucher (AKA preloader) (Queue Enterprise feature)
+     *
+     * @param pretouchIntervalMillis
+     * @return
+     */
+    public SingleChronicleQueueBuilder enablePreloader(final long pretouchIntervalMillis) {
+<span class="nc" id="L558">        this.pretouchIntervalMillis = pretouchIntervalMillis;</span>
+<span class="nc" id="L559">        return this;</span>
+    }
+
+    /**
+     * Interval in ms to invoke out of process pretoucher. Default is not to turn on
+     *
+     * @return interval ms
+     */
+    public long pretouchIntervalMillis() {
+<span class="nc" id="L568">        return pretouchIntervalMillis;</span>
+    }
+
+    public boolean hasPretouchIntervalMillis() {
+<span class="pc bpc" id="L572" title="1 of 2 branches missed.">        return pretouchIntervalMillis != null;</span>
+    }
+
+    public SingleChronicleQueueBuilder path(String path) {
+<span class="nc" id="L576">        return path(new File(path));</span>
+    }
+
+    public SingleChronicleQueueBuilder path(final File path) {
+<span class="fc" id="L580">        this.path = path;</span>
+<span class="fc" id="L581">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder path(final Path path) {
+<span class="fc" id="L585">        this.path = path.toFile();</span>
+<span class="fc" id="L586">        return this;</span>
+    }
+
+    /**
+     * consumer will be called every second, also as there is data to report
+     *
+     * @param onRingBufferStats a consumer of the BytesRingBufferStats
+     * @return this
+     */
+    public SingleChronicleQueueBuilder onRingBufferStats(@NotNull Consumer&lt;BytesRingBufferStats&gt; onRingBufferStats) {
+<span class="nc" id="L596">        this.onRingBufferStats = onRingBufferStats;</span>
+<span class="nc" id="L597">        return this;</span>
+    }
+
+    public Consumer&lt;BytesRingBufferStats&gt; onRingBufferStats() {
+<span class="fc" id="L601">        return this.onRingBufferStats;</span>
+    }
+
+    @NotNull
+    public File path() {
+<span class="fc" id="L606">        return this.path;</span>
+    }
+
+    public SingleChronicleQueueBuilder blockSize(long blockSize) {
+<span class="fc" id="L610">        this.blockSize = Math.max(TEST_BLOCK_SIZE, blockSize);</span>
+<span class="fc" id="L611">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder blockSize(int blockSize) {
+<span class="fc" id="L615">        return blockSize((long) blockSize);</span>
+    }
+
+    /**
+     * @return - this is the size of a memory mapping chunk, a queue is read/written by using a number of blocks, you should avoid changing this unnecessarily.
+     */
+    public long blockSize() {
+
+<span class="pc bpc" id="L623" title="1 of 4 branches missed.">        long bs = blockSize == null ? OS.is64Bit() ? 64L &lt;&lt; 20 : TEST_BLOCK_SIZE : blockSize;</span>
+
+        // can add an index2index &amp; an index in one go.
+<span class="fc" id="L626">        long minSize = Math.max(TEST_BLOCK_SIZE, 32L * indexCount());</span>
+<span class="fc" id="L627">        return Math.max(minSize, bs);</span>
+    }
+
+    /**
+     * THIS IS FOR TESTING ONLY.
+     * This makes the block size small to speed up short tests and show up issues which occur when moving from one block to another.
+     * &lt;p&gt;
+     * Using this will be slower when you have many messages, and break when you have large messages.
+     * &lt;/p&gt;
+     *
+     * @return this
+     */
+    public SingleChronicleQueueBuilder testBlockSize() {
+        // small size for testing purposes only.
+<span class="pc bpc" id="L641" title="1 of 2 branches missed.">        return blockSize(OS.isWindows() ? 64 &lt;&lt; 10 : OS.pageSize());</span>
+    }
+
+    @NotNull
+    public SingleChronicleQueueBuilder wireType(@NotNull WireType wireType) {
+<span class="pc bpc" id="L646" title="1 of 2 branches missed.">        if (wireType == WireType.DELTA_BINARY)</span>
+<span class="nc" id="L647">            deltaCheckpointInterval(64);</span>
+<span class="fc" id="L648">        this.wireType = wireType;</span>
+<span class="fc" id="L649">        return this;</span>
+    }
+
+    private void deltaCheckpointInterval(int deltaCheckpointInterval) {
+<span class="nc bnc" id="L653" title="All 4 branches missed.">        assert checkIsPowerOf2(deltaCheckpointInterval);</span>
+<span class="nc" id="L654">        this.deltaCheckpointInterval = deltaCheckpointInterval;</span>
+<span class="nc" id="L655">    }</span>
+
+    private boolean checkIsPowerOf2(long value) {
+<span class="nc bnc" id="L658" title="All 2 branches missed.">        return (value &amp; (value - 1)) == 0;</span>
+    }
+
+    @NotNull
+    public WireType wireType() {
+<span class="pc bpc" id="L663" title="1 of 2 branches missed.">        return this.wireType == null ? WireType.BINARY_LIGHT : wireType;</span>
+    }
+
+    @NotNull
+    public SingleChronicleQueueBuilder rollCycle(@NotNull RollCycle rollCycle) {
+<span class="pc bpc" id="L668" title="2 of 4 branches missed.">        assert rollCycle != null;</span>
+<span class="fc" id="L669">        this.rollCycle = rollCycle;</span>
+<span class="fc" id="L670">        return this;</span>
+    }
+
+    @NotNull
+    public RollCycle rollCycle() {
+<span class="fc bfc" id="L675" title="All 2 branches covered.">        return this.rollCycle == null ? loadDefaultRollCycle() : this.rollCycle;</span>
+    }
+
+    /**
+     * @return ring buffer capacity in bytes [ Chronicle-Ring is an enterprise product ]
+     */
+    public long bufferCapacity() {
+<span class="fc bfc" id="L682" title="All 2 branches covered.">        return Math.min(blockSize() / 4, bufferCapacity == null ? 2 &lt;&lt; 20 : bufferCapacity);</span>
+    }
+
+    /**
+     * @param bufferCapacity sets the ring buffer capacity in bytes
+     * @return this
+     */
+    @NotNull
+    public SingleChronicleQueueBuilder bufferCapacity(long bufferCapacity) {
+<span class="fc" id="L691">        this.bufferCapacity = bufferCapacity;</span>
+<span class="fc" id="L692">        return this;</span>
+    }
+
+    /**
+     * sets epoch offset in milliseconds
+     *
+     * @param epoch sets an epoch offset as the number of number of milliseconds since January 1,
+     *              1970,  00:00:00 GMT
+     * @return {@code this}
+     */
+    @NotNull
+    public SingleChronicleQueueBuilder epoch(long epoch) {
+<span class="fc" id="L704">        this.epoch = epoch;</span>
+<span class="fc" id="L705">        queueOffsetSpec = QueueOffsetSpec.ofEpoch(epoch);</span>
+<span class="fc" id="L706">        return this;</span>
+    }
+
+    /**
+     * @return epoch offset as the number of number of milliseconds since January 1, 1970,  00:00:00
+     * GMT
+     */
+    public long epoch() {
+<span class="fc bfc" id="L714" title="All 2 branches covered.">        return epoch == null ? Long.getLong(QueueSystemProperties.DEFAULT_EPOCH_PROPERTY, 0L) : epoch;</span>
+    }
+
+    /**
+     * when set to {@code true}. uses a ring buffer to buffer appends, excerpts are written to the
+     * Chronicle Queue using a background thread. See also {@link #writeBufferMode()}
+     *
+     * @param isBuffered {@code true} if the append is buffered
+     * @return this
+     */
+    @NotNull
+    @Deprecated // use writeBufferMode(Asynchronous) instead
+    public SingleChronicleQueueBuilder buffered(boolean isBuffered) {
+<span class="nc bnc" id="L727" title="All 2 branches missed.">        this.writeBufferMode = isBuffered ? BufferMode.Asynchronous : BufferMode.None;</span>
+<span class="nc" id="L728">        return this;</span>
+    }
+
+    /**
+     * @return if we uses a ring buffer to buffer the appends, the Excerpts are written to the
+     * Chronicle Queue using a background thread
+     */
+    @Deprecated(/* to be removed in x.22 */)
+    public boolean buffered() {
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        return this.writeBufferMode == BufferMode.Asynchronous;</span>
+    }
+
+    /**
+     * @return BufferMode to use for writes. Only None is available is the OSS
+     */
+    @NotNull
+    public BufferMode writeBufferMode() {
+<span class="pc bpc" id="L745" title="2 of 4 branches missed.">        return wireType() == WireType.DELTA_BINARY ? BufferMode.None : (writeBufferMode == null)</span>
+                ? BufferMode.None : writeBufferMode;
+    }
+
+    /**
+     * When writeBufferMode is set to {@code Asynchronous}, uses a ring buffer to buffer appends, excerpts are written to the
+     * Chronicle Queue using a background thread.
+     * See also {@link #bufferCapacity()}
+     * See also {@link #bufferBytesStoreCreator()}
+     * See also software.chronicle.enterprise.ring.EnterpriseRingBuffer
+     *
+     * @param writeBufferMode bufferMode for writing
+     * @return this
+     */
+    public SingleChronicleQueueBuilder writeBufferMode(BufferMode writeBufferMode) {
+<span class="fc" id="L760">        this.writeBufferMode = writeBufferMode;</span>
+<span class="fc" id="L761">        return this;</span>
+    }
+
+    /**
+     * @return BufferMode to use for reads. Only None is available is the OSS
+     */
+    public BufferMode readBufferMode() {
+<span class="nc bnc" id="L768" title="All 2 branches missed.">        return readBufferMode == null ? BufferMode.None : readBufferMode;</span>
+    }
+
+    /**
+     * When readBufferMode is set to {@code Asynchronous}, reads from the ring buffer. This requires
+     * that {@link #writeBufferMode()} is also set to {@code Asynchronous}.
+     * See also {@link #bufferCapacity()}
+     * See also {@link #bufferBytesStoreCreator()}
+     * See also software.chronicle.enterprise.ring.EnterpriseRingBuffer
+     *
+     * @param readBufferMode BufferMode for read
+     * @return this
+     */
+    public SingleChronicleQueueBuilder readBufferMode(BufferMode readBufferMode) {
+<span class="nc" id="L782">        this.readBufferMode = readBufferMode;</span>
+<span class="nc" id="L783">        return this;</span>
+    }
+
+    /**
+     * @return a new event loop instance if none has been set, otherwise the {@code eventLoop}
+     * that was set
+     */
+    @NotNull
+    public EventLoop eventLoop() {
+<span class="pc bpc" id="L792" title="1 of 2 branches missed.">        if (eventLoop == null)</span>
+<span class="fc" id="L793">            return new OnDemandEventLoop(</span>
+<span class="nc" id="L794">                    () -&gt; new MediumEventLoop(null, path.getName(), Pauser.busy(), true, &quot;none&quot;));</span>
+<span class="nc" id="L795">        return eventLoop;</span>
+    }
+
+    @NotNull
+    public SingleChronicleQueueBuilder eventLoop(EventLoop eventLoop) {
+<span class="nc" id="L800">        this.eventLoop = eventLoop;</span>
+<span class="nc" id="L801">        return this;</span>
+    }
+
+    /**
+     * @return if the ring buffer's monitoring capability is turned on. Not available in OSS
+     */
+    public boolean enableRingBufferMonitoring() {
+<span class="nc bnc" id="L808" title="All 2 branches missed.">        return enableRingBufferMonitoring == null ? false : enableRingBufferMonitoring;</span>
+    }
+
+    public SingleChronicleQueueBuilder enableRingBufferMonitoring(boolean enableRingBufferMonitoring) {
+<span class="nc" id="L812">        this.enableRingBufferMonitoring = enableRingBufferMonitoring;</span>
+<span class="nc" id="L813">        return this;</span>
+    }
+
+    /**
+     * @return if ring buffer reader processes can invoke the CQ drainer, otherwise only writer processes can
+     */
+    public boolean ringBufferReaderCanDrain() {
+<span class="nc bnc" id="L820" title="All 2 branches missed.">        return ringBufferReaderCanDrain == null ? true : ringBufferReaderCanDrain;</span>
+    }
+
+    public SingleChronicleQueueBuilder ringBufferReaderCanDrain(boolean ringBufferReaderCanDrain) {
+<span class="nc" id="L824">        this.ringBufferReaderCanDrain = ringBufferReaderCanDrain;</span>
+<span class="nc" id="L825">        return this;</span>
+    }
+
+    /**
+     * @return whether to force creating a reader (to recover from crash)
+     */
+    public boolean ringBufferForceCreateReader() {
+<span class="nc bnc" id="L832" title="All 2 branches missed.">        return ringBufferForceCreateReader == null ? false : ringBufferForceCreateReader;</span>
+    }
+
+    public SingleChronicleQueueBuilder ringBufferForceCreateReader(boolean ringBufferForceCreateReader) {
+<span class="nc" id="L836">        this.ringBufferForceCreateReader = ringBufferForceCreateReader;</span>
+<span class="nc" id="L837">        return this;</span>
+    }
+
+    /**
+     * @return if ring buffer readers are not reset on close. If true then re-opening a reader puts you back
+     * at the same place. If true, your reader can block writers if the reader is not open
+     */
+    public boolean ringBufferReopenReader() {
+<span class="nc bnc" id="L845" title="All 2 branches missed.">        return ringBufferReopenReader == null ? false : ringBufferReopenReader;</span>
+    }
+
+    public SingleChronicleQueueBuilder ringBufferReopenReader(boolean ringBufferReopenReader) {
+<span class="nc" id="L849">        this.ringBufferReopenReader = ringBufferReopenReader;</span>
+<span class="nc" id="L850">        return this;</span>
+    }
+
+    /**
+     * Priority for ring buffer's drainer handler
+     *
+     * @return drainerPriority
+     */
+    public HandlerPriority drainerPriority() {
+<span class="nc bnc" id="L859" title="All 2 branches missed.">        return drainerPriority == null ? HandlerPriority.MEDIUM : drainerPriority;</span>
+    }
+
+    public SingleChronicleQueueBuilder drainerPriority(HandlerPriority drainerPriority) {
+<span class="nc" id="L863">        this.drainerPriority = drainerPriority;</span>
+<span class="nc" id="L864">        return this;</span>
+    }
+
+    public int drainerTimeoutMS() {
+<span class="nc bnc" id="L868" title="All 2 branches missed.">        return drainerTimeoutMS &lt;= 0 ? 10_000 : drainerTimeoutMS;</span>
+    }
+
+    public SingleChronicleQueueBuilder drainerTimeoutMS(int timeout) {
+<span class="nc" id="L872">        drainerTimeoutMS = timeout;</span>
+<span class="nc" id="L873">        return this;</span>
+    }
+
+    /**
+     * Pauser supplier for the pauser to be used by ring buffer when waiting
+     */
+    public Supplier&lt;Pauser&gt; ringBufferPauserSupplier() {
+<span class="nc bnc" id="L880" title="All 2 branches missed.">        return ringBufferPauserSupplier == null ? Pauser::busy : ringBufferPauserSupplier;</span>
+    }
+
+    @Deprecated(/* to be removed in x.22 */)
+    public SingleChronicleQueueBuilder ringBufferPauser(Pauser ringBufferPauser) {
+<span class="nc" id="L885">        return ringBufferPauserSupplier(() -&gt; ringBufferPauser);</span>
+    }
+
+    public SingleChronicleQueueBuilder ringBufferPauserSupplier(Supplier&lt;Pauser&gt; ringBufferPauserSupplier) {
+<span class="nc" id="L889">        this.ringBufferPauserSupplier = ringBufferPauserSupplier;</span>
+<span class="nc" id="L890">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder indexCount(int indexCount) {
+<span class="fc" id="L894">        this.indexCount = Maths.nextPower2(indexCount, 8);</span>
+<span class="fc" id="L895">        return this;</span>
+    }
+
+    public int indexCount() {
+<span class="pc bpc" id="L899" title="1 of 4 branches missed.">        return indexCount == null || indexCount &lt;= 0 ? rollCycle().defaultIndexCount() : indexCount;</span>
+    }
+
+    public SingleChronicleQueueBuilder indexSpacing(int indexSpacing) {
+<span class="fc" id="L903">        this.indexSpacing = Maths.nextPower2(indexSpacing, 1);</span>
+<span class="fc" id="L904">        return this;</span>
+    }
+
+    public int indexSpacing() {
+<span class="pc bpc" id="L908" title="1 of 4 branches missed.">        return indexSpacing == null || indexSpacing &lt;= 0 ? rollCycle().defaultIndexSpacing() :</span>
+<span class="fc" id="L909">                indexSpacing;</span>
+    }
+
+    public TimeProvider timeProvider() {
+<span class="fc bfc" id="L913" title="All 2 branches covered.">        return timeProvider == null ? SystemTimeProvider.INSTANCE : timeProvider;</span>
+    }
+
+    public SingleChronicleQueueBuilder timeProvider(TimeProvider timeProvider) {
+<span class="fc" id="L917">        this.timeProvider = timeProvider;</span>
+<span class="fc" id="L918">        return this;</span>
+    }
+
+    public Supplier&lt;TimingPauser&gt; pauserSupplier() {
+<span class="pc bpc" id="L922" title="1 of 2 branches missed.">        return pauserSupplier == null ? TIMING_PAUSER_SUPPLIER : pauserSupplier;</span>
+    }
+
+    public SingleChronicleQueueBuilder pauserSupplier(Supplier&lt;TimingPauser&gt; pauser) {
+<span class="nc" id="L926">        this.pauserSupplier = pauser;</span>
+<span class="nc" id="L927">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder timeoutMS(long timeoutMS) {
+<span class="fc" id="L931">        this.timeoutMS = timeoutMS;</span>
+<span class="fc" id="L932">        return this;</span>
+    }
+
+    public long timeoutMS() {
+<span class="fc bfc" id="L936" title="All 2 branches covered.">        return timeoutMS == null ? 10_000L : timeoutMS;</span>
+    }
+
+    public SingleChronicleQueueBuilder storeFileListener(StoreFileListener storeFileListener) {
+<span class="fc" id="L940">        this.storeFileListener = storeFileListener;</span>
+<span class="fc" id="L941">        return this;</span>
+    }
+
+    public StoreFileListener storeFileListener() {
+<span class="fc bfc" id="L945" title="All 2 branches covered.">        return storeFileListener == null ?</span>
+                (cycle, file) -&gt; {
+<span class="fc bfc" id="L947" title="All 2 branches covered.">                    if (Jvm.isDebugEnabled(getClass()))</span>
+<span class="fc" id="L948">                        Jvm.debug().on(getClass(), &quot;File released &quot; + file);</span>
+<span class="fc" id="L949">                } : storeFileListener;</span>
+
+    }
+
+    public SingleChronicleQueueBuilder sourceId(int sourceId) {
+<span class="pc bpc" id="L954" title="1 of 2 branches missed.">        if (sourceId &lt; 0)</span>
+<span class="nc" id="L955">            throw new IllegalArgumentException(&quot;Invalid source Id, must be positive&quot;);</span>
+<span class="fc" id="L956">        this.sourceId = sourceId;</span>
+<span class="fc" id="L957">        return this;</span>
+    }
+
+    public int sourceId() {
+<span class="fc bfc" id="L961" title="All 2 branches covered.">        return sourceId == null ? 0 : sourceId;</span>
+    }
+
+    public boolean readOnly() {
+<span class="pc bpc" id="L965" title="1 of 4 branches missed.">        return Boolean.TRUE.equals(readOnly) &amp;&amp; !OS.isWindows();</span>
+    }
+
+    public SingleChronicleQueueBuilder readOnly(boolean readOnly) {
+<span class="pc bpc" id="L969" title="3 of 4 branches missed.">        if (OS.isWindows() &amp;&amp; readOnly)</span>
+<span class="nc" id="L970">            Jvm.warn().on(SingleChronicleQueueBuilder.class,</span>
+                    &quot;Read-only mode is not supported on Windows® platforms, defaulting to read/write.&quot;);
+        else
+<span class="fc" id="L973">            this.readOnly = readOnly;</span>
+
+<span class="fc" id="L975">        return this;</span>
+    }
+
+    public boolean doubleBuffer() {
+<span class="fc" id="L979">        return doubleBuffer;</span>
+    }
+
+    /**
+     * &lt;p&gt;
+     * Enables double-buffered writes on contention.
+     * &lt;/p&gt;&lt;p&gt;
+     * Normally, all writes to the queue will be serialized based on the write lock acquisition. Each time {@link ExcerptAppender#writingDocument()}
+     * is called, appender tries to acquire the write lock on the queue, and if it fails to do so it blocks until write
+     * lock is unlocked, and in turn locks the queue for itself.
+     * &lt;/p&gt;&lt;p&gt;
+     * When double-buffering is enabled, if appender sees that the write lock is acquired upon {@link ExcerptAppender#writingDocument()} call,
+     * it returns immediately with a context pointing to the secondary buffer, and essentially defers lock acquisition
+     * until the context.close() is called (normally with try-with-resources pattern it is at the end of the try block),
+     * allowing user to go ahead writing data, and then essentially doing memcpy on the serialized data (thus reducing cost of serialization).
+     * &lt;/p&gt;&lt;p&gt;
+     * This is only useful if (majority of) the objects being written to the queue are big enough AND their marshalling is not straight-forward
+     * (e.g. BytesMarshallable's marshalling is very efficient and quick and hence double-buffering will only slow things down), and if there's a
+     * heavy contention on writes (e.g. 2 or more threads writing a lot of data to the queue at a very high rate).
+     * &lt;/p&gt;
+     */
+    public SingleChronicleQueueBuilder doubleBuffer(boolean doubleBuffer) {
+<span class="fc" id="L1001">        this.doubleBuffer = doubleBuffer;</span>
+<span class="fc" id="L1002">        return this;</span>
+    }
+
+    public Supplier&lt;BiConsumer&lt;BytesStore, Bytes&gt;&gt; encodingSupplier() {
+<span class="nc" id="L1006">        return encodingSupplier;</span>
+    }
+
+    public Supplier&lt;BiConsumer&lt;BytesStore, Bytes&gt;&gt; decodingSupplier() {
+<span class="nc" id="L1010">        return decodingSupplier;</span>
+    }
+
+    public SingleChronicleQueueBuilder codingSuppliers(@Nullable
+                                                               Supplier&lt;BiConsumer&lt;BytesStore, Bytes&gt;&gt; encodingSupplier,
+                                                       @Nullable Supplier&lt;BiConsumer&lt;BytesStore, Bytes&gt;&gt; decodingSupplier) {
+<span class="nc bnc" id="L1016" title="All 6 branches missed.">        if ((encodingSupplier == null) != (decodingSupplier == null))</span>
+<span class="nc" id="L1017">            throw new UnsupportedOperationException(&quot;Both encodingSupplier and decodingSupplier must be set or neither&quot;);</span>
+<span class="nc" id="L1018">        this.encodingSupplier = encodingSupplier;</span>
+<span class="nc" id="L1019">        this.decodingSupplier = decodingSupplier;</span>
+<span class="nc" id="L1020">        return this;</span>
+    }
+
+    public SecretKeySpec key() {
+<span class="nc" id="L1024">        return key;</span>
+    }
+
+    protected void preBuild() {
+        try {
+<span class="fc" id="L1029">            initializeMetadata();</span>
+<span class="fc" id="L1030">        } catch (Exception ex) {</span>
+<span class="fc" id="L1031">            Closeable.closeQuietly(metaStore);</span>
+<span class="fc" id="L1032">            throw ex;</span>
+<span class="fc" id="L1033">        }</span>
+<span class="pc bpc" id="L1034" title="1 of 8 branches missed.">        if ((epoch == null || epoch == 0) &amp;&amp; (rollTime != null &amp;&amp; rollTimeZone != null))</span>
+<span class="fc" id="L1035">            rollTime(rollTime, rollTimeZone);</span>
+<span class="fc" id="L1036">    }</span>
+
+    /**
+     * @param strongAppenders by default, we create the appenders as a weak reference, these can get garbage collected. To avoid them becoming unnecessarily garbage collected, set this to {@code true}
+     * @return that
+     */
+    public SingleChronicleQueueBuilder strongAppenders(boolean strongAppenders) {
+<span class="nc" id="L1043">        this.strongAppenders = strongAppenders;</span>
+<span class="nc" id="L1044">        return this;</span>
+    }
+
+    /**
+     * @return {@code true} if we are using strong appender, by default, we create the appenders in a thread-local, weak reference, these can get
+     * garbage collected. * Setting them to strong will ensure they are created using a strong reference.
+     */
+    public boolean strongAppenders() {
+<span class="nc" id="L1052">        return Boolean.TRUE.equals(strongAppenders);</span>
+    }
+
+    // *************************************************************************
+    //
+    // *************************************************************************
+
+    public boolean checkInterrupts() {
+
+<span class="pc bpc" id="L1061" title="1 of 2 branches missed.">        if (System.getProperties().contains(&quot;chronicle.queue.checkInterrupts&quot;))</span>
+<span class="nc" id="L1062">            return Jvm.getBoolean(&quot;chronicle.queue.checkInterrupts&quot;);</span>
+
+<span class="fc" id="L1064">        return checkInterrupts;</span>
+    }
+
+    public SingleChronicleQueueBuilder checkInterrupts(boolean checkInterrupts) {
+<span class="fc" id="L1068">        this.checkInterrupts = checkInterrupts;</span>
+<span class="fc" id="L1069">        return this;</span>
+    }
+
+    public SingleChronicleQueueBuilder clone() {
+        try {
+<span class="nc" id="L1074">            return (SingleChronicleQueueBuilder) super.clone();</span>
+<span class="nc" id="L1075">        } catch (Exception e) {</span>
+<span class="nc" id="L1076">            throw new AssertionError(e);</span>
+        }
+    }
+
+    /**
+     * updates all the fields in &lt;code&gt;this&lt;/code&gt; that are null, from the parentBuilder
+     *
+     * @param parentBuilder the parentBuilder Chronicle Queue Builder
+     * @return that
+     */
+
+    public SingleChronicleQueueBuilder setAllNullFields(@Nullable SingleChronicleQueueBuilder parentBuilder) {
+<span class="pc bpc" id="L1088" title="1 of 2 branches missed.">        if (parentBuilder == null)</span>
+<span class="nc" id="L1089">            return this;</span>
+
+<span class="pc bpc" id="L1091" title="3 of 4 branches missed.">        if (!(this.getClass().isAssignableFrom(parentBuilder.getClass()) || parentBuilder.getClass().isAssignableFrom(this.getClass())))</span>
+<span class="nc" id="L1092">            throw new IllegalArgumentException(&quot;Classes are not in same implementation hierarchy&quot;);</span>
+
+<span class="fc" id="L1094">        List&lt;FieldInfo&gt; sourceFieldInfo = Wires.fieldInfos(parentBuilder.getClass());</span>
+
+<span class="fc bfc" id="L1096" title="All 2 branches covered.">        for (final FieldInfo fieldInfo : Wires.fieldInfos(this.getClass())) {</span>
+<span class="pc bpc" id="L1097" title="1 of 2 branches missed.">            if (!sourceFieldInfo.contains(fieldInfo))</span>
+<span class="nc" id="L1098">                continue;</span>
+<span class="fc" id="L1099">            Object resultV = fieldInfo.get(this);</span>
+<span class="fc" id="L1100">            Object parentV = fieldInfo.get(parentBuilder);</span>
+<span class="fc bfc" id="L1101" title="All 4 branches covered.">            if (resultV == null &amp;&amp; parentV != null)</span>
+<span class="fc" id="L1102">                fieldInfo.set(this, parentV);</span>
+
+<span class="fc" id="L1104">        }</span>
+<span class="fc" id="L1105">        return this;</span>
+    }
+
+    public WriteLock appendLock() {
+<span class="fc bfc" id="L1109" title="All 2 branches covered.">        return readOnly() ? WriteLock.NO_OP : new TableStoreWriteLock(metaStore, pauserSupplier(), timeoutMS() * 3 / 2, TableStoreWriteLock.APPEND_LOCK_KEY);</span>
+    }
+
+<span class="fc" id="L1112">    enum DefaultPauserSupplier implements Supplier&lt;TimingPauser&gt; {</span>
+<span class="fc" id="L1113">        INSTANCE;</span>
+
+        @Override
+        public TimingPauser get() {
+<span class="fc" id="L1117">            return new TimeoutPauser(500_000);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

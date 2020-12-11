@@ -1,0 +1,948 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StoreAppender.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">StoreAppender.java</span></div><h1>StoreAppender.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.bytes.*;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.StackTrace;
+import net.openhft.chronicle.core.annotation.UsedViaReflection;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptAppender;
+import net.openhft.chronicle.queue.QueueSystemProperties;
+import net.openhft.chronicle.queue.batch.BatchAppender;
+import net.openhft.chronicle.queue.impl.ExcerptContext;
+import net.openhft.chronicle.queue.impl.WireStore;
+import net.openhft.chronicle.queue.impl.WireStorePool;
+import net.openhft.chronicle.queue.impl.table.AbstractTSQueueLock;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.io.EOFException;
+import java.io.File;
+import java.io.IOException;
+import java.io.StreamCorruptedException;
+import java.nio.BufferOverflowException;
+
+import static net.openhft.chronicle.wire.Wires.*;
+
+<span class="pc bpc" id="L29" title="1 of 2 branches missed.">class StoreAppender extends AbstractCloseable</span>
+        implements ExcerptAppender, ExcerptContext, InternalAppender {
+    @NotNull
+    private final SingleChronicleQueue queue;
+    @NotNull
+    private final WriteLock writeLock;
+    private final WriteLock appendLock;
+
+    @NotNull
+    private final StoreAppenderContext writeContext;
+    private final WireStorePool storePool;
+    private final boolean checkInterrupts;
+    @Nullable
+    SingleChronicleQueueStore store;
+<span class="fc" id="L43">    private int cycle = Integer.MIN_VALUE;</span>
+    @Nullable
+    private Wire wire;
+    @Nullable
+    private Wire wireForIndex;
+<span class="fc" id="L48">    private long positionOfHeader = 0;</span>
+<span class="fc" id="L49">    private long lastIndex = Long.MIN_VALUE;</span>
+    private long lastPosition;
+    private int lastCycle;
+<span class="fc" id="L52">    @Nullable</span>
+    private Pretoucher pretoucher = null;
+    private NativeBytesStore&lt;Void&gt; batchTmp;
+<span class="fc" id="L55">    private Wire bufferWire = null;</span>
+    @UsedViaReflection
+    private final Finalizer finalizer;
+    private boolean disableThreadSafetyCheck;
+<span class="fc" id="L59">    private int count = 0;</span>
+
+    StoreAppender(@NotNull final SingleChronicleQueue queue,
+                  @NotNull final WireStorePool storePool,
+<span class="fc" id="L63">                  final boolean checkInterrupts) {</span>
+<span class="fc" id="L64">        this.queue = queue;</span>
+<span class="fc" id="L65">        this.storePool = storePool;</span>
+<span class="fc" id="L66">        this.checkInterrupts = checkInterrupts;</span>
+<span class="fc" id="L67">        this.writeLock = queue.writeLock();</span>
+<span class="fc" id="L68">        this.appendLock = queue.appendLock();</span>
+
+<span class="fc" id="L70">        this.writeContext = new StoreAppenderContext();</span>
+
+        // always put references to &quot;this&quot; last.
+<span class="fc" id="L73">        queue.addCloseListener(this);</span>
+
+<span class="fc" id="L75">        queue.cleanupStoreFilesWithNoData();</span>
+<span class="fc" id="L76">        int cycle = queue.cycle();</span>
+<span class="fc" id="L77">        int lastCycle = queue.lastCycle();</span>
+<span class="fc bfc" id="L78" title="All 4 branches covered.">        if (lastCycle != cycle &amp;&amp; lastCycle &gt;= 0)</span>
+            // ensure that the EOF is written on the last cycle
+<span class="fc" id="L80">            setCycle2(lastCycle, false);</span>
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">        finalizer = Jvm.isResourceTracing() ? new Finalizer() : null;</span>
+<span class="fc" id="L82">    }</span>
+
+    private void checkAppendLock() {
+<span class="fc" id="L85">        checkAppendLock(false);</span>
+<span class="fc" id="L86">    }</span>
+
+    /**
+     * check the appendLock
+     * @param allowMyProcess this will only be true for any writes coming from the sink replicator
+     */
+    private void checkAppendLock(boolean allowMyProcess) {
+<span class="fc bfc" id="L93" title="All 2 branches covered.">        if (appendLock.locked())</span>
+<span class="fc" id="L94">            checkAppendLockLocked(allowMyProcess);</span>
+<span class="fc" id="L95">    }</span>
+
+    private void checkAppendLockLocked(boolean allowMyProcess) {
+        // separate method as this is in fast path
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">        if (appendLock instanceof AbstractTSQueueLock) {</span>
+<span class="fc" id="L100">            final AbstractTSQueueLock appendLock = (AbstractTSQueueLock) this.appendLock;</span>
+<span class="fc" id="L101">            final long lockedBy = appendLock.lockedBy();</span>
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">            if (lockedBy == AbstractTSQueueLock.UNLOCKED)</span>
+<span class="nc" id="L103">                return;</span>
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">            boolean myPID = lockedBy == Jvm.getProcessId();</span>
+<span class="pc bpc" id="L105" title="1 of 4 branches missed.">            if (allowMyProcess &amp;&amp; myPID)</span>
+<span class="fc" id="L106">                return;</span>
+<span class="pc bpc" id="L107" title="1 of 2 branches missed.">            throw new IllegalStateException(&quot;locked: unable to append because a lock is being held by pid=&quot; + (myPID ? &quot;me&quot; : lockedBy));</span>
+        } else
+<span class="nc" id="L109">            throw new IllegalStateException(&quot;locked: unable to append&quot;);</span>
+    }
+
+    private static void releaseBytesFor(Wire w) {
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        if (w != null) {</span>
+<span class="fc" id="L114">            w.bytes().releaseLast();</span>
+        }
+<span class="fc" id="L116">    }</span>
+
+    @Deprecated // Should not be providing accessors to reference-counted objects
+    @NotNull
+    WireStore store() {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (store == null)</span>
+<span class="nc" id="L122">            setCycle(cycle());</span>
+<span class="nc" id="L123">        return store;</span>
+    }
+
+    /**
+     * @param marshallable to write to excerpt.
+     */
+    @Override
+    public void writeBytes(@NotNull final WriteBytesMarshallable marshallable) throws UnrecoverableTimeoutException {
+<span class="fc" id="L131">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L133">        try (DocumentContext dc = writingDocument()) {</span>
+<span class="fc" id="L134">            Bytes&lt;?&gt; bytes = dc.wire().bytes();</span>
+<span class="fc" id="L135">            long wp = bytes.writePosition();</span>
+<span class="fc" id="L136">            marshallable.writeMarshallable(bytes);</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">            if (wp == bytes.writePosition())</span>
+<span class="nc" id="L138">                dc.rollbackOnClose();</span>
+        }
+<span class="fc" id="L140">    }</span>
+
+    @Override
+    protected void performClose() {
+<span class="fc" id="L144">        releaseBytesFor(wireForIndex);</span>
+<span class="fc" id="L145">        releaseBytesFor(wire);</span>
+<span class="fc" id="L146">        releaseBytesFor(bufferWire);</span>
+
+<span class="fc bfc" id="L148" title="All 2 branches covered.">        if (pretoucher != null)</span>
+<span class="fc" id="L149">            pretoucher.close();</span>
+
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        if (store != null) {</span>
+<span class="fc" id="L152">            storePool.closeStore(store);</span>
+<span class="fc" id="L153">            store = null;</span>
+        }
+
+<span class="fc" id="L156">        storePool.close();</span>
+
+<span class="fc" id="L158">        pretoucher = null;</span>
+<span class="fc" id="L159">        wireForIndex = null;</span>
+<span class="fc" id="L160">        wire = null;</span>
+<span class="fc" id="L161">        bufferWire = null;</span>
+<span class="fc" id="L162">    }</span>
+
+    /**
+     * pretouch() has to be run on the same thread, as the thread that created the appender. If you want to use pretouch() in another thread, you must
+     * first create or have an appender that was created on this thread, and then use this appender to call the pretouch()
+     */
+    @Override
+    public void pretouch() {
+<span class="fc" id="L170">        throwExceptionIfClosed();</span>
+
+        try {
+<span class="fc bfc" id="L173" title="All 2 branches covered.">            if (pretoucher == null)</span>
+<span class="fc" id="L174">                pretoucher = new Pretoucher(queue());</span>
+
+<span class="fc" id="L176">            pretoucher.execute();</span>
+
+<span class="nc" id="L178">        } catch (Throwable e) {</span>
+<span class="nc" id="L179">            Jvm.warn().on(getClass(), e);</span>
+<span class="nc" id="L180">            throw Jvm.rethrow(e);</span>
+<span class="fc" id="L181">        }</span>
+<span class="fc" id="L182">    }</span>
+
+    @Nullable
+    @Override
+    public Wire wire() {
+<span class="nc" id="L187">        return wire;</span>
+    }
+
+    @Override
+    public long batchAppend(final int timeoutMS, final BatchAppender batchAppender) {
+<span class="nc" id="L192">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L194">        long maxMsgSize = this.queue.blockSize() / 4;</span>
+<span class="nc" id="L195">        long startTime = System.currentTimeMillis();</span>
+<span class="nc" id="L196">        long count = 0;</span>
+<span class="nc" id="L197">        long lastIndex = -1;</span>
+        do {
+<span class="nc" id="L199">            int defaultIndexSpacing = this.queue.rollCycle().defaultIndexSpacing();</span>
+<span class="nc" id="L200">            Wire wire = wire();</span>
+<span class="nc" id="L201">            int writeCount = Math.min(128 &lt;&lt; 10,</span>
+                    (int) (defaultIndexSpacing - (lastIndex &amp; (defaultIndexSpacing - 1)) - 1));
+
+<span class="nc bnc" id="L204" title="All 4 branches missed.">            if (wire != null &amp;&amp; writeCount &gt; 0) {</span>
+<span class="nc" id="L205">                MappedBytes bytes = (MappedBytes) wire.bytes();</span>
+<span class="nc" id="L206">                long address = bytes.addressForWrite(bytes.writePosition());</span>
+<span class="nc" id="L207">                long bstart = bytes.start();</span>
+<span class="nc" id="L208">                long bcap = bytes.realCapacity();</span>
+<span class="nc" id="L209">                long canWrite = bcap - (bytes.writePosition() - bstart);</span>
+<span class="nc" id="L210">                long lengthCount = batchAppender.writeMessages(address, canWrite, writeCount);</span>
+<span class="nc" id="L211">                bytes.writeSkip((int) lengthCount);</span>
+<span class="nc" id="L212">                lastIndex += lengthCount &gt;&gt; 32;</span>
+<span class="nc" id="L213">                count += lengthCount &gt;&gt; 32;</span>
+
+<span class="nc" id="L215">            } else {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                if (batchTmp == null) {</span>
+<span class="nc" id="L217">                    batchTmp = NativeBytesStore.lazyNativeBytesStoreWithFixedCapacity(maxMsgSize);</span>
+                }
+
+<span class="nc" id="L220">                try (DocumentContext dc = writingDocument()) {</span>
+<span class="nc" id="L221">                    long lengthCount = batchAppender.writeMessages(batchTmp.addressForWrite(0), maxMsgSize, 1);</span>
+<span class="nc" id="L222">                    int len = (int) lengthCount;</span>
+<span class="nc" id="L223">                    dc.wire().bytes().write(batchTmp, (long) Integer.BYTES, (long) len - Integer.BYTES);</span>
+                }
+<span class="nc" id="L225">                lastIndex = lastIndexAppended();</span>
+<span class="nc" id="L226">                count++;</span>
+            }
+        }
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        while (startTime + timeoutMS &gt; System.currentTimeMillis());</span>
+
+<span class="nc" id="L231">        return count;</span>
+    }
+
+    @Nullable
+    @Override
+    public Wire wireForIndex() {
+<span class="fc" id="L237">        return wireForIndex;</span>
+    }
+
+    @Override
+    public long timeoutMS() {
+<span class="fc" id="L242">        return queue.timeoutMS;</span>
+    }
+
+    void lastIndex(long index) {
+<span class="fc" id="L246">        this.lastIndex = index;</span>
+<span class="fc" id="L247">    }</span>
+
+    @Override
+    public boolean recordHistory() {
+<span class="fc bfc" id="L251" title="All 2 branches covered.">        return sourceId() != 0;</span>
+    }
+
+    void setCycle(int cycle) {
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (cycle != this.cycle)</span>
+<span class="nc" id="L256">            setCycle2(cycle, true);</span>
+<span class="nc" id="L257">    }</span>
+
+    private void setCycle2(final int cycle, final boolean createIfAbsent) {
+<span class="fc" id="L260">        queue.throwExceptionIfClosed();</span>
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">        if (cycle &lt; 0)</span>
+<span class="nc" id="L262">            throw new IllegalArgumentException(&quot;You can not have a cycle that starts &quot; +</span>
+                    &quot;before Epoch. cycle=&quot; + cycle);
+
+<span class="fc" id="L265">        SingleChronicleQueue queue = this.queue;</span>
+
+<span class="fc" id="L267">        SingleChronicleQueueStore oldStore = this.store;</span>
+
+<span class="fc" id="L269">        SingleChronicleQueueStore newStore = storePool.acquire(cycle, queue.epoch(), createIfAbsent, oldStore);</span>
+
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">        if (newStore != oldStore) {</span>
+<span class="fc" id="L272">            this.store = newStore;</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">            if (oldStore != null)</span>
+<span class="fc" id="L274">                storePool.closeStore(oldStore);</span>
+        }
+<span class="fc" id="L276">        resetWires(queue);</span>
+
+        // only set the cycle after the wire is set.
+<span class="fc" id="L279">        this.cycle = cycle;</span>
+
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">        if (this.store == null)</span>
+<span class="nc" id="L282">            return;</span>
+
+<span class="pc bpc" id="L284" title="2 of 4 branches missed.">        assert wire.startUse();</span>
+<span class="fc" id="L285">        wire.parent(this);</span>
+<span class="fc" id="L286">        wire.pauser(queue.pauserSupplier.get());</span>
+<span class="fc" id="L287">        resetPosition();</span>
+<span class="fc" id="L288">        queue.onRoll(cycle);</span>
+<span class="fc" id="L289">    }</span>
+
+    private void resetWires(@NotNull final ChronicleQueue queue) {
+<span class="fc" id="L292">        WireType wireType = queue.wireType();</span>
+        {
+<span class="fc" id="L294">            Wire oldw = this.wire;</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">            this.wire = store == null ? null : createWire(wireType);</span>
+<span class="pc bpc" id="L296" title="4 of 6 branches missed.">            assert wire != oldw || wire == null;</span>
+<span class="fc" id="L297">            releaseBytesFor(oldw);</span>
+        }
+        {
+<span class="fc" id="L300">            Wire old = this.wireForIndex;</span>
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">            this.wireForIndex = store == null ? null : createWire(wireType);</span>
+<span class="pc bpc" id="L302" title="4 of 6 branches missed.">            assert wire != old || wire == null;</span>
+<span class="fc" id="L303">            releaseBytesFor(old);</span>
+        }
+<span class="fc" id="L305">    }</span>
+
+    private Wire createWire(@NotNull final WireType wireType) {
+<span class="fc" id="L308">        final Wire w = wireType.apply(store.bytes());</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">        if (store.dataVersion() &gt; 0)</span>
+<span class="fc" id="L310">            w.usePadding(true);</span>
+<span class="fc" id="L311">        return w;</span>
+    }
+
+    /**
+     * @return true if the header number is changed, otherwise false
+     * @throws UnrecoverableTimeoutException
+     */
+    private boolean resetPosition() throws UnrecoverableTimeoutException {
+<span class="fc" id="L319">        long originalHeaderNumber = wire.headerNumber();</span>
+        try {
+<span class="pc bpc" id="L321" title="2 of 4 branches missed.">            if (store == null || wire == null)</span>
+<span class="nc" id="L322">                return false;</span>
+<span class="fc" id="L323">            long position = store.writePosition();</span>
+<span class="fc" id="L324">            position(position, position);</span>
+
+<span class="fc" id="L326">            Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="pc bpc" id="L327" title="2 of 6 branches missed.">            assert !QueueSystemProperties.CHECK_INDEX || checkPositionOfHeader(bytes);</span>
+
+<span class="fc" id="L329">            final long headerNumber = store.lastSequenceNumber(this);</span>
+<span class="fc" id="L330">            wire.headerNumber(queue.rollCycle().toIndex(cycle, headerNumber + 1) - 1);</span>
+
+<span class="pc bpc" id="L332" title="2 of 8 branches missed.">            assert !QueueSystemProperties.CHECK_INDEX || wire.headerNumber() != -1 || checkIndex(wire.headerNumber(), positionOfHeader);</span>
+
+<span class="fc" id="L334">            bytes.writeLimit(bytes.capacity());</span>
+
+<span class="pc bpc" id="L336" title="2 of 6 branches missed.">            assert !QueueSystemProperties.CHECK_INDEX || checkWritePositionHeaderNumber();</span>
+<span class="fc bfc" id="L337" title="All 2 branches covered.">            return originalHeaderNumber != wire.headerNumber();</span>
+
+<span class="nc" id="L339">        } catch (@NotNull BufferOverflowException | StreamCorruptedException e) {</span>
+<span class="nc" id="L340">            throw new AssertionError(e);</span>
+        }
+
+    }
+
+    private boolean checkPositionOfHeader(final Bytes&lt;?&gt; bytes) {
+<span class="fc bfc" id="L346" title="All 2 branches covered.">        if (positionOfHeader == 0) {</span>
+<span class="fc" id="L347">            return true;</span>
+        }
+<span class="fc" id="L349">        int header = bytes.readVolatileInt(positionOfHeader);</span>
+        // ready or an incomplete message header?
+<span class="pc bpc" id="L351" title="3 of 4 branches missed.">        return isReadyData(header) || isNotComplete(header);</span>
+    }
+
+    @NotNull
+    @Override
+    public DocumentContext writingDocument() throws UnrecoverableTimeoutException {
+<span class="fc" id="L357">        return writingDocument(false); // avoid overhead of a default method.</span>
+    }
+
+    @NotNull
+    @Override
+    public DocumentContext writingDocument(final boolean metaData) throws UnrecoverableTimeoutException {
+<span class="fc" id="L363">        throwExceptionIfClosed();</span>
+        // we allow the sink process to write metaData
+<span class="fc" id="L365">        checkAppendLock(metaData);</span>
+<span class="fc" id="L366">        count++;</span>
+<span class="fc bfc" id="L367" title="All 2 branches covered.">        if (count &gt; 1) {</span>
+<span class="pc bpc" id="L368" title="2 of 4 branches missed.">            assert metaData == writeContext.metaData;</span>
+<span class="fc" id="L369">            return writeContext;</span>
+        }
+
+<span class="pc bpc" id="L372" title="5 of 6 branches missed.">        if (queue.doubleBuffer &amp;&amp; writeLock.locked() &amp;&amp; !metaData) {</span>
+<span class="nc" id="L373">            writeContext.isClosed = false;</span>
+<span class="nc" id="L374">            writeContext.rollbackOnClose = false;</span>
+<span class="nc" id="L375">            writeContext.buffered = true;</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">            if (bufferWire == null) {</span>
+<span class="nc" id="L377">                Bytes bufferBytes = Bytes.allocateElasticOnHeap();</span>
+<span class="nc" id="L378">                bufferWire = queue().wireType().apply(bufferBytes);</span>
+            }
+<span class="nc" id="L380">            writeContext.wire = bufferWire;</span>
+<span class="nc" id="L381">            writeContext.metaData(false);</span>
+        } else {
+<span class="fc" id="L383">            writeLock.lock();</span>
+<span class="fc" id="L384">            int cycle = queue.cycle();</span>
+
+<span class="fc bfc" id="L386" title="All 2 branches covered.">            if (wire == null)</span>
+<span class="fc" id="L387">                setWireIfNull(cycle);</span>
+
+<span class="fc bfc" id="L389" title="All 2 branches covered.">            if (this.cycle != cycle)</span>
+<span class="fc" id="L390">                rollCycleTo(cycle);</span>
+
+<span class="fc" id="L392">            int safeLength = (int) queue.overlapSize();</span>
+<span class="fc" id="L393">            resetPosition();</span>
+<span class="pc bpc" id="L394" title="2 of 6 branches missed.">            assert !QueueSystemProperties.CHECK_INDEX || checkWritePositionHeaderNumber();</span>
+
+            // sets the writeLimit based on the safeLength
+<span class="fc" id="L397">            openContext(metaData, safeLength);</span>
+        }
+        // there is nothing to read.
+<span class="fc" id="L400">        wire.bytes().readPosition(wire.bytes().writePosition());</span>
+<span class="fc" id="L401">        return writeContext;</span>
+    }
+
+    @Override
+    public DocumentContext acquireWritingDocument(boolean metaData) {
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">        if (!CHECK_THREAD_SAFETY)</span>
+<span class="nc" id="L407">            this.threadSafetyCheck(true);</span>
+<span class="fc bfc" id="L408" title="All 6 branches covered.">        if (wire != null &amp;&amp; writeContext.isOpen() &amp;&amp; writeContext.chainedElement())</span>
+<span class="fc" id="L409">            return writeContext;</span>
+<span class="fc" id="L410">        return writingDocument(metaData);</span>
+    }
+
+    private void setWireIfNull(final int cycle) {
+<span class="fc" id="L414">        int lastCycle = queue.lastCycle();</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">        if (lastCycle == Integer.MIN_VALUE)</span>
+<span class="fc" id="L416">            lastCycle = cycle;</span>
+        else {
+<span class="fc" id="L418">            int cur = lastCycle - 1;</span>
+<span class="fc" id="L419">            int firstCycle = queue.firstCycle();</span>
+<span class="fc bfc" id="L420" title="All 2 branches covered.">            while (cur &gt;= firstCycle) {</span>
+<span class="fc" id="L421">                setCycle2(cur, false);</span>
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">                if (wire != null) {</span>
+<span class="pc bpc" id="L423" title="1 of 2 branches missed.">                    if (!store.writeEOF(wire, timeoutMS()))</span>
+<span class="fc" id="L424">                        break;</span>
+                }
+<span class="nc" id="L426">                cur--;</span>
+            }
+        }
+
+<span class="fc" id="L430">        setCycle2(lastCycle, true);</span>
+<span class="fc" id="L431">    }</span>
+
+    private long writeHeader(@NotNull final Wire wire, final int safeLength) {
+<span class="fc" id="L434">        Bytes&lt;?&gt; bytes = wire.bytes();</span>
+        // writePosition points at the last record in the queue, so we can just skip it and we're ready for write
+<span class="fc" id="L436">        long pos = positionOfHeader;</span>
+<span class="fc" id="L437">        long lastPos = store.writePosition();</span>
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">        if (pos &lt; lastPos) {</span>
+            // queue moved since we last touched it - recalculate header number
+
+            try {
+<span class="nc" id="L442">                wire.headerNumber(queue.rollCycle().toIndex(cycle, store.lastSequenceNumber(this)));</span>
+<span class="nc" id="L443">            } catch (StreamCorruptedException ex) {</span>
+<span class="nc" id="L444">                Jvm.warn().on(getClass(), &quot;Couldn't find last sequence&quot;, ex);</span>
+<span class="nc" id="L445">            }</span>
+        }
+<span class="fc" id="L447">        int header = bytes.readVolatileInt(lastPos);</span>
+<span class="pc bpc" id="L448" title="2 of 4 branches missed.">        assert header != NOT_INITIALIZED;</span>
+<span class="fc" id="L449">        lastPos += lengthOf(bytes.readVolatileInt(lastPos)) + SPB_HEADER_SIZE;</span>
+<span class="fc" id="L450">        bytes.writePosition(lastPos);</span>
+<span class="fc" id="L451">        return wire.enterHeader(safeLength);</span>
+    }
+
+    private void openContext(final boolean metaData, final int safeLength) {
+<span class="pc bpc" id="L455" title="2 of 4 branches missed.">        assert wire != null;</span>
+<span class="fc" id="L456">        this.positionOfHeader = writeHeader(wire, safeLength); // sets wire.bytes().writePosition = position + 4;</span>
+<span class="fc" id="L457">        writeContext.isClosed = false;</span>
+<span class="fc" id="L458">        writeContext.rollbackOnClose = false;</span>
+<span class="fc" id="L459">        writeContext.buffered = false;</span>
+<span class="fc" id="L460">        writeContext.wire = wire; // Jvm.isDebug() ? acquireBufferWire() : wire;</span>
+<span class="fc" id="L461">        writeContext.metaData(metaData);</span>
+<span class="fc" id="L462">    }</span>
+
+    boolean checkWritePositionHeaderNumber() {
+<span class="pc bpc" id="L465" title="2 of 4 branches missed.">        if (wire == null || wire.headerNumber() == Long.MIN_VALUE) return true;</span>
+        try {
+<span class="fc" id="L467">            long pos = positionOfHeader;</span>
+
+<span class="fc" id="L469">            long seq1 = queue.rollCycle().toSequenceNumber(wire.headerNumber() + 1) - 1;</span>
+<span class="fc" id="L470">            long seq2 = store.sequenceForPosition(this, pos, true);</span>
+
+<span class="pc bpc" id="L472" title="1 of 2 branches missed.">            if (seq1 != seq2) {</span>
+<span class="nc" id="L473">                String message = &quot;~~~~~~~~~~~~~~ &quot; +</span>
+<span class="nc" id="L474">                        &quot;thread: &quot; + Thread.currentThread().getName() +</span>
+                        &quot; pos: &quot; + pos +
+<span class="nc" id="L476">                        &quot; header: &quot; + wire.headerNumber() +</span>
+                        &quot; seq1: &quot; + seq1 +
+                        &quot; seq2: &quot; + seq2;
+<span class="nc" id="L479">                AssertionError ae = new AssertionError(message);</span>
+<span class="nc" id="L480">                ae.printStackTrace();</span>
+<span class="nc" id="L481">                throw ae;</span>
+            }
+<span class="nc" id="L483">        } catch (Exception e) {</span>
+            // TODO FIX
+<span class="nc" id="L485">            Jvm.warn().on(getClass(), e);</span>
+<span class="nc" id="L486">            throw Jvm.rethrow(e);</span>
+<span class="fc" id="L487">        }</span>
+<span class="fc" id="L488">        return true;</span>
+    }
+
+    @Override
+    public int sourceId() {
+<span class="fc" id="L493">        return queue.sourceId;</span>
+    }
+
+    @Override
+    public void writeBytes(@NotNull final BytesStore bytes) throws UnrecoverableTimeoutException {
+<span class="fc" id="L498">        throwExceptionIfClosed();</span>
+<span class="fc" id="L499">        checkAppendLock();</span>
+<span class="fc" id="L500">        writeLock.lock();</span>
+        try {
+<span class="fc" id="L502">            int cycle = queue.cycle();</span>
+<span class="fc bfc" id="L503" title="All 2 branches covered.">            if (wire == null)</span>
+<span class="fc" id="L504">                setWireIfNull(cycle);</span>
+
+<span class="fc bfc" id="L506" title="All 2 branches covered.">            if (this.cycle != cycle)</span>
+<span class="fc" id="L507">                rollCycleTo(cycle);</span>
+
+<span class="fc" id="L509">            this.positionOfHeader = writeHeader(wire, (int) queue.overlapSize()); // writeHeader sets wire.byte().writePosition</span>
+
+<span class="pc bpc" id="L511" title="2 of 4 branches missed.">            assert ((AbstractWire) wire).isInsideHeader();</span>
+<span class="fc" id="L512">            beforeAppend(wire, wire.headerNumber() + 1);</span>
+<span class="fc" id="L513">            Bytes&lt;?&gt; wireBytes = wire.bytes();</span>
+<span class="fc" id="L514">            wireBytes.write(bytes);</span>
+<span class="fc" id="L515">            wire.updateHeader(positionOfHeader, false, 0);</span>
+<span class="fc" id="L516">            lastIndex(wire.headerNumber());</span>
+<span class="fc" id="L517">            lastPosition = positionOfHeader;</span>
+<span class="fc" id="L518">            lastCycle = cycle;</span>
+<span class="fc" id="L519">            store.writePosition(positionOfHeader);</span>
+<span class="fc" id="L520">            writeIndexForPosition(lastIndex, positionOfHeader);</span>
+<span class="nc" id="L521">        } catch (StreamCorruptedException e) {</span>
+<span class="nc" id="L522">            throw new AssertionError(e);</span>
+        } finally {
+<span class="fc" id="L524">            writeLock.unlock();</span>
+        }
+<span class="fc" id="L526">    }</span>
+
+    /**
+     * Write bytes at an index, but only if the index is at the end of the chronicle. If index is after the end of the chronicle, throw an
+     * IllegalStateException. If the index is before the end of the chronicle then do not change the state of the chronicle.
+     * &lt;p&gt;Thread-safe&lt;/p&gt;
+     *
+     * @param index index to write at. Only if index is at the end of the chronicle will the bytes get written
+     * @param bytes payload
+     */
+    public void writeBytes(final long index, @NotNull final BytesStore bytes) {
+<span class="fc" id="L537">        throwExceptionIfClosed();</span>
+<span class="fc" id="L538">        checkAppendLock();</span>
+<span class="fc" id="L539">        writeLock.lock();</span>
+        try {
+<span class="fc" id="L541">            writeBytesInternal(index, bytes);</span>
+        } finally {
+<span class="fc" id="L543">            writeLock.unlock();</span>
+        }
+<span class="fc" id="L545">    }</span>
+
+    /**
+     * Appends bytes without write lock. Should only be used if write lock is acquired externally. Never use without write locking as it WILL corrupt
+     * the queue file and cause data loss.
+     */
+    protected void writeBytesInternal(final long index, @NotNull final BytesStore bytes) {
+<span class="fc" id="L552">        writeBytesInternal(index, bytes, false);</span>
+<span class="fc" id="L553">    }</span>
+
+    protected void writeBytesInternal(final long index, @NotNull final BytesStore bytes, boolean metadata) {
+<span class="fc" id="L556">        checkAppendLock(true);</span>
+
+<span class="fc" id="L558">        final int cycle = queue.rollCycle().toCycle(index);</span>
+
+<span class="fc bfc" id="L560" title="All 2 branches covered.">        if (wire == null)</span>
+<span class="fc" id="L561">            setCycle2(cycle, true);</span>
+<span class="fc bfc" id="L562" title="All 2 branches covered.">        else if (queue.rollCycle().toCycle(wire.headerNumber()) != cycle)</span>
+<span class="fc" id="L563">            rollCycleTo(cycle);</span>
+
+<span class="fc" id="L565">        long headerNumber = wire.headerNumber();</span>
+<span class="fc bfc" id="L566" title="All 2 branches covered.">        boolean isNextIndex = index == headerNumber + 1;</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">        if (!isNextIndex) {</span>
+
+            // in case our cached headerNumber is incorrect.
+<span class="fc bfc" id="L570" title="All 2 branches covered.">            if (resetPosition()) {</span>
+
+<span class="fc" id="L572">                headerNumber = wire.headerNumber();</span>
+
+                /// if the header number has changed then we will have roll
+<span class="pc bpc" id="L575" title="1 of 2 branches missed.">                if (queue.rollCycle().toCycle(headerNumber) != cycle) {</span>
+<span class="nc" id="L576">                    rollCycleTo(cycle);</span>
+<span class="nc" id="L577">                    headerNumber = wire.headerNumber();</span>
+                }
+            }
+
+<span class="fc bfc" id="L581" title="All 2 branches covered.">            isNextIndex = index == headerNumber + 1;</span>
+<span class="fc bfc" id="L582" title="All 2 branches covered.">            if (!isNextIndex) {</span>
+<span class="fc bfc" id="L583" title="All 2 branches covered.">                if (index &gt; headerNumber + 1)</span>
+<span class="fc" id="L584">                    throw new IllegalStateException(&quot;Unable to move to index &quot; + Long.toHexString(index) + &quot; beyond the end of the queue, current: &quot; + Long.toHexString(headerNumber));</span>
+
+                // this can happen when using queue replication when we are back filling from a number of sinks at them same time
+                // its normal behaviour in the is use case so should not be a WARN
+<span class="fc bfc" id="L588" title="All 2 branches covered.">                if (Jvm.isDebugEnabled(getClass()))</span>
+<span class="fc" id="L589">                    Jvm.debug().on(getClass(), &quot;Trying to overwrite index &quot; + Long.toHexString(index) + &quot; which is before the end of the queue&quot;);</span>
+<span class="fc" id="L590">                return;</span>
+            }
+        }
+<span class="fc" id="L593">        writeBytesInternal(bytes, metadata);</span>
+
+<span class="fc" id="L595">        headerNumber = wire.headerNumber();</span>
+<span class="pc bpc" id="L596" title="1 of 2 branches missed.">        boolean isIndex = index == headerNumber;</span>
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">        if (!isIndex) {</span>
+<span class="nc" id="L598">            writeBytesInternal(bytes, metadata);</span>
+<span class="nc" id="L599">            Thread.yield();</span>
+        }
+<span class="fc" id="L601">    }</span>
+
+    private void writeBytesInternal(@NotNull final BytesStore bytes, boolean metadata) {
+<span class="pc bpc" id="L604" title="2 of 4 branches missed.">        assert writeLock.locked();</span>
+        try {
+<span class="fc" id="L606">            int safeLength = (int) queue.overlapSize();</span>
+<span class="pc bpc" id="L607" title="2 of 4 branches missed.">            assert count == 0 : &quot;count=&quot; + count;</span>
+<span class="fc" id="L608">            openContext(metadata, safeLength);</span>
+
+            try {
+<span class="fc" id="L611">                writeContext.wire().bytes().write(bytes);</span>
+            } finally {
+<span class="fc" id="L613">                writeContext.close(false);</span>
+<span class="fc" id="L614">                count = 0;</span>
+            }
+        } finally {
+<span class="fc" id="L617">            writeContext.isClosed = true;</span>
+        }
+<span class="fc" id="L619">    }</span>
+
+    private void position(final long position, final long startOfMessage) {
+        // did the position jump too far forward.
+<span class="pc bpc" id="L623" title="1 of 2 branches missed.">        if (position &gt; store.writePosition() + queue.blockSize())</span>
+<span class="nc" id="L624">            throw new IllegalArgumentException(&quot;pos: &quot; + position + &quot;, store.writePosition()=&quot; +</span>
+<span class="nc" id="L625">                    store.writePosition() + &quot; queue.blockSize()=&quot; + queue.blockSize());</span>
+<span class="fc" id="L626">        position0(position, startOfMessage);</span>
+<span class="fc" id="L627">    }</span>
+
+    @Override
+    public long lastIndexAppended() {
+<span class="fc bfc" id="L631" title="All 2 branches covered.">        if (lastIndex != Long.MIN_VALUE)</span>
+<span class="fc" id="L632">            return lastIndex;</span>
+
+<span class="pc bpc" id="L634" title="2 of 4 branches missed.">        if (lastPosition == Long.MIN_VALUE || wire == null) {</span>
+<span class="fc" id="L635">            throw new IllegalStateException(&quot;nothing has been appended, so there is no last index&quot;);</span>
+        }
+
+        try {
+<span class="nc" id="L639">            long sequenceNumber = store.sequenceForPosition(this, lastPosition, true);</span>
+<span class="nc" id="L640">            long index = queue.rollCycle().toIndex(lastCycle, sequenceNumber);</span>
+<span class="nc" id="L641">            lastIndex(index);</span>
+<span class="nc" id="L642">            return index;</span>
+<span class="nc" id="L643">        } catch (Exception e) {</span>
+<span class="nc" id="L644">            throw Jvm.rethrow(e);</span>
+        }
+    }
+
+    @Override
+    public int cycle() {
+<span class="fc bfc" id="L650" title="All 2 branches covered.">        if (cycle == Integer.MIN_VALUE) {</span>
+<span class="fc" id="L651">            int cycle = this.queue.lastCycle();</span>
+<span class="fc bfc" id="L652" title="All 2 branches covered.">            if (cycle &lt; 0)</span>
+<span class="fc" id="L653">                cycle = queue.cycle();</span>
+<span class="fc" id="L654">            return cycle;</span>
+        }
+<span class="fc" id="L656">        return cycle;</span>
+    }
+
+    @Override
+    @NotNull
+    public SingleChronicleQueue queue() {
+<span class="fc" id="L662">        return queue;</span>
+
+    }
+
+    /*
+     * overridden in delta wire
+     */
+    @SuppressWarnings(&quot;unused&quot;)
+    void beforeAppend(final Wire wire, final long index) {
+<span class="fc" id="L671">    }</span>
+
+    /*
+     * wire must be not null when this method is called
+     */
+    private void rollCycleTo(final int cycle) throws UnrecoverableTimeoutException {
+
+        // only a valid check if the wire was set.
+<span class="pc bpc" id="L679" title="1 of 2 branches missed.">        if (this.cycle == cycle)</span>
+<span class="nc" id="L680">            throw new AssertionError();</span>
+
+<span class="fc" id="L682">        store.writeEOF(wire, timeoutMS());</span>
+
+<span class="fc" id="L684">        int lastCycle = queue.lastCycle();</span>
+
+<span class="pc bpc" id="L686" title="1 of 6 branches missed.">        if (lastCycle &lt; cycle &amp;&amp; lastCycle != this.cycle &amp;&amp; lastCycle &gt;= 0) {</span>
+<span class="fc" id="L687">            setCycle2(lastCycle, false);</span>
+<span class="fc" id="L688">            rollCycleTo(cycle);</span>
+        } else {
+<span class="fc" id="L690">            setCycle2(cycle, true);</span>
+        }
+<span class="fc" id="L692">    }</span>
+
+    /**
+     * Write an EOF marker on the current cycle if it is about to roll. It would do this any way if a new message was written, but this doesn't create
+     * a new cycle or add a message. Only used by tests.
+     */
+    void writeEndOfCycleIfRequired() {
+<span class="pc bpc" id="L699" title="2 of 4 branches missed.">        if (wire != null &amp;&amp; queue.cycle() != cycle)</span>
+<span class="fc" id="L700">            store.writeEOF(wire, timeoutMS());</span>
+<span class="fc" id="L701">    }</span>
+
+    void writeIndexForPosition(final long index, final long position)
+            throws UnrecoverableTimeoutException, StreamCorruptedException {
+
+<span class="fc" id="L706">        long sequenceNumber = queue.rollCycle().toSequenceNumber(index);</span>
+<span class="fc" id="L707">        store.setPositionForSequenceNumber(this, sequenceNumber, position);</span>
+<span class="fc" id="L708">    }</span>
+
+    boolean checkIndex(final long index, final long position) {
+        try {
+<span class="fc" id="L712">            final long seq1 = queue.rollCycle().toSequenceNumber(index + 1) - 1;</span>
+<span class="fc" id="L713">            final long seq2 = store.sequenceForPosition(this, position, true);</span>
+
+<span class="pc bpc" id="L715" title="1 of 2 branches missed.">            if (seq1 != seq2) {</span>
+<span class="nc" id="L716">                final long seq3 = store.indexing</span>
+<span class="nc" id="L717">                        .linearScanByPosition(wireForIndex(), position, 0, 0, true);</span>
+<span class="nc" id="L718">                System.out.println(&quot;Thread=&quot; + Thread.currentThread().getName() +</span>
+                        &quot; pos: &quot; + position +
+<span class="nc" id="L720">                        &quot; seq1: &quot; + Long.toHexString(seq1) +</span>
+<span class="nc" id="L721">                        &quot; seq2: &quot; + Long.toHexString(seq2) +</span>
+<span class="nc" id="L722">                        &quot; seq3: &quot; + Long.toHexString(seq3));</span>
+
+<span class="nc" id="L724">                System.out.println(store.dump());</span>
+
+<span class="nc bnc" id="L726" title="All 4 branches missed.">                assert seq1 == seq3 : &quot;seq1=&quot; + seq1 + &quot;, seq3=&quot; + seq3;</span>
+<span class="nc bnc" id="L727" title="All 4 branches missed.">                assert seq1 == seq2 : &quot;seq1=&quot; + seq1 + &quot;, seq2=&quot; + seq2;</span>
+
+            }
+<span class="nc" id="L730">        } catch (@NotNull EOFException | UnrecoverableTimeoutException | StreamCorruptedException e) {</span>
+<span class="nc" id="L731">            throw new AssertionError(e);</span>
+<span class="fc" id="L732">        }</span>
+<span class="fc" id="L733">        return true;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L738">        return &quot;StoreAppender{&quot; +</span>
+                &quot;queue=&quot; + queue +
+                &quot;, cycle=&quot; + cycle +
+                &quot;, position=&quot; + positionOfHeader +
+                &quot;, lastIndex=&quot; + lastIndex +
+                &quot;, lastPosition=&quot; + lastPosition +
+                &quot;, lastCycle=&quot; + lastCycle +
+                '}';
+    }
+
+    void position0(final long position, final long startOfMessage) {
+<span class="fc" id="L749">        this.positionOfHeader = position;</span>
+<span class="fc" id="L750">        wire.bytes().writePosition(startOfMessage);</span>
+<span class="fc" id="L751">    }</span>
+
+    @Override
+    public ExcerptAppender disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
+<span class="nc" id="L755">        this.disableThreadSafetyCheck = disableThreadSafetyCheck;</span>
+<span class="nc" id="L756">        return this;</span>
+    }
+
+    @Override
+    protected boolean threadSafetyCheck(boolean isUsed) {
+<span class="pc bpc" id="L761" title="1 of 2 branches missed.">        return disableThreadSafetyCheck</span>
+<span class="pc bpc" id="L762" title="1 of 2 branches missed.">                || super.threadSafetyCheck(isUsed);</span>
+    }
+
+    @Override
+    public File currentFile() {
+<span class="nc" id="L767">        SingleChronicleQueueStore store = this.store;</span>
+<span class="nc bnc" id="L768" title="All 2 branches missed.">        return store == null ? null : store.currentFile();</span>
+    }
+
+<span class="fc" id="L771">    private class Finalizer {</span>
+        @Override
+        protected void finalize() throws Throwable {
+<span class="fc" id="L774">            super.finalize();</span>
+<span class="fc" id="L775">            warnAndCloseIfNotClosed();</span>
+<span class="fc" id="L776">        }</span>
+    }
+
+<span class="pc bpc" id="L779" title="1 of 2 branches missed.">    final class StoreAppenderContext implements WriteDocumentContext {</span>
+
+<span class="fc" id="L781">        boolean isClosed = true;</span>
+<span class="fc" id="L782">        private boolean metaData = false;</span>
+<span class="fc" id="L783">        private boolean rollbackOnClose = false;</span>
+<span class="fc" id="L784">        private boolean buffered = false;</span>
+        @Nullable
+        private Wire wire;
+        private boolean alreadyClosedFound;
+        private StackTrace closedHere;
+        private boolean chainedElement;
+
+        @Override
+        public int sourceId() {
+<span class="nc" id="L793">            return StoreAppender.this.sourceId();</span>
+        }
+
+        @Override
+        public boolean isPresent() {
+<span class="nc" id="L798">            return false;</span>
+        }
+
+        @Override
+        public Wire wire() {
+<span class="fc" id="L803">            return wire;</span>
+        }
+
+        @Override
+        public boolean isMetaData() {
+<span class="fc" id="L808">            return metaData;</span>
+        }
+
+        /**
+         * Call this if you have detected an error condition and you want the context rolled back when it is closed, rather than committed
+         */
+        @Override
+        public void rollbackOnClose() {
+<span class="fc" id="L816">            this.rollbackOnClose = true;</span>
+<span class="fc" id="L817">        }</span>
+
+        @Override
+        public void close() {
+<span class="fc" id="L821">            close(true);</span>
+<span class="fc" id="L822">        }</span>
+
+        public void close(boolean unlock) {
+<span class="fc bfc" id="L825" title="All 2 branches covered.">            if (chainedElement)</span>
+<span class="fc" id="L826">                return;</span>
+<span class="pc bpc" id="L827" title="1 of 2 branches missed.">            if (isClosed) {</span>
+<span class="nc" id="L828">                Jvm.warn().on(getClass(), &quot;Already Closed, close was called twice.&quot;, new StackTrace(&quot;Second close&quot;, closedHere));</span>
+<span class="nc" id="L829">                alreadyClosedFound = true;</span>
+<span class="nc" id="L830">                return;</span>
+            }
+<span class="fc" id="L832">            count--;</span>
+<span class="fc bfc" id="L833" title="All 2 branches covered.">            if (count &gt; 0)</span>
+<span class="fc" id="L834">                return;</span>
+
+<span class="pc bpc" id="L836" title="1 of 2 branches missed.">            if (alreadyClosedFound) {</span>
+<span class="nc" id="L837">                closedHere = new StackTrace(&quot;Closed here&quot;);</span>
+            }
+
+            try {
+                // historically there have been problems with an interrupted thread causing exceptions
+                // in calls below, and we saw half-written messages
+<span class="fc bfc" id="L843" title="All 4 branches covered.">                final boolean interrupted = checkInterrupts &amp;&amp; Thread.currentThread().isInterrupted();</span>
+<span class="fc bfc" id="L844" title="All 2 branches covered.">                if (interrupted)</span>
+<span class="fc" id="L845">                    throw new InterruptedException();</span>
+<span class="fc bfc" id="L846" title="All 2 branches covered.">                if (rollbackOnClose) {</span>
+<span class="fc" id="L847">                    doRollback();</span>
+<span class="fc" id="L848">                    return;</span>
+                }
+
+<span class="pc bpc" id="L851" title="1 of 2 branches missed.">                if (wire == StoreAppender.this.wire) {</span>
+
+                    try {
+<span class="fc" id="L854">                        wire.updateHeader(positionOfHeader, metaData, 0);</span>
+<span class="nc" id="L855">                    } catch (IllegalStateException e) {</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">                        if (queue.isClosed())</span>
+<span class="nc" id="L857">                            return;</span>
+<span class="nc" id="L858">                        throw e;</span>
+<span class="fc" id="L859">                    }</span>
+
+<span class="fc" id="L861">                    lastPosition = positionOfHeader;</span>
+<span class="fc" id="L862">                    lastCycle = cycle;</span>
+
+<span class="fc bfc" id="L864" title="All 2 branches covered.">                    if (!metaData) {</span>
+<span class="fc" id="L865">                        lastIndex(wire.headerNumber());</span>
+<span class="fc" id="L866">                        store.writePosition(positionOfHeader);</span>
+<span class="pc bpc" id="L867" title="1 of 2 branches missed.">                        if (lastIndex != Long.MIN_VALUE)</span>
+<span class="fc" id="L868">                            writeIndexForPosition(lastIndex, positionOfHeader);</span>
+                    }
+
+<span class="nc bnc" id="L871" title="All 2 branches missed.">                } else if (wire != null) {</span>
+<span class="nc bnc" id="L872" title="All 2 branches missed.">                    if (buffered) {</span>
+<span class="nc" id="L873">                        writeBytes(wire.bytes());</span>
+<span class="nc" id="L874">                        unlock = false;</span>
+                    } else {
+<span class="nc" id="L876">                        writeBytesInternal(wire.bytes(), metaData);</span>
+<span class="nc" id="L877">                        wire = StoreAppender.this.wire;</span>
+                    }
+                }
+<span class="fc" id="L880">            } catch (StreamCorruptedException | UnrecoverableTimeoutException | InterruptedException e) {</span>
+<span class="fc" id="L881">                throw new IllegalStateException(e);</span>
+            } finally {
+<span class="fc" id="L883">                isClosed = true;</span>
+<span class="fc bfc" id="L884" title="All 2 branches covered.">                if (unlock)</span>
+                    try {
+<span class="fc" id="L886">                        writeLock.unlock();</span>
+<span class="nc" id="L887">                    } catch (Exception ex) {</span>
+<span class="nc" id="L888">                        Jvm.warn().on(getClass(), &quot;Exception while unlocking: &quot;, ex);</span>
+<span class="fc" id="L889">                    }</span>
+            }
+<span class="fc" id="L891">        }</span>
+
+        private void doRollback() {
+            // zero out all contents...
+<span class="fc bfc" id="L895" title="All 2 branches covered.">            for (long i = positionOfHeader; i &lt;= wire.bytes().writePosition(); i++)</span>
+<span class="fc" id="L896">                wire.bytes().writeByte(i, (byte) 0);</span>
+<span class="fc" id="L897">            long lastPosition = StoreAppender.this.lastPosition;</span>
+<span class="fc" id="L898">            position0(lastPosition, lastPosition);</span>
+<span class="fc" id="L899">            ((AbstractWire) wire).forceNotInsideHeader();</span>
+<span class="fc" id="L900">        }</span>
+
+        @Override
+        public long index() throws IORuntimeException {
+<span class="pc bpc" id="L904" title="1 of 2 branches missed.">            if (this.wire.headerNumber() == Long.MIN_VALUE) {</span>
+                try {
+<span class="nc" id="L906">                    wire.headerNumber(queue.rollCycle().toIndex(cycle, store.lastSequenceNumber(StoreAppender.this)));</span>
+<span class="nc" id="L907">                    long headerNumber0 = wire.headerNumber();</span>
+<span class="nc bnc" id="L908" title="All 4 branches missed.">                    assert (((AbstractWire) this.wire).isInsideHeader());</span>
+<span class="nc bnc" id="L909" title="All 2 branches missed.">                    return isMetaData() ? headerNumber0 : headerNumber0 + 1;</span>
+<span class="nc" id="L910">                } catch (IOException e) {</span>
+<span class="nc" id="L911">                    throw new IORuntimeException(e);</span>
+                }
+            }
+
+<span class="pc bpc" id="L915" title="1 of 2 branches missed.">            return isMetaData() ? Long.MIN_VALUE : this.wire.headerNumber() + 1;</span>
+        }
+
+        @Override
+        public boolean isOpen() {
+<span class="fc bfc" id="L920" title="All 2 branches covered.">            return !isClosed;</span>
+        }
+
+        @Override
+        public boolean isNotComplete() {
+<span class="pc bpc" id="L925" title="1 of 2 branches missed.">            return !isClosed;</span>
+        }
+
+        @Override
+        public void start(boolean metaData) {
+<span class="nc" id="L930">            throw new UnsupportedOperationException();</span>
+        }
+
+        public void metaData(boolean metaData) {
+<span class="fc" id="L934">            this.metaData = metaData;</span>
+<span class="fc" id="L935">        }</span>
+
+        @Override
+        public boolean chainedElement() {
+<span class="fc" id="L939">            return chainedElement;</span>
+        }
+
+        @Override
+        public void chainedElement(boolean chainedElement) {
+<span class="fc" id="L944">            this.chainedElement = chainedElement;</span>
+<span class="fc" id="L945">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

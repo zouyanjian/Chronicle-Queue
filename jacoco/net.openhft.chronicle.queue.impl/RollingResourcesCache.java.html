@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RollingResourcesCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl</a> &gt; <span class="el_source">RollingResourcesCache.java</span></div><h1>RollingResourcesCache.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl;
+
+import net.openhft.chronicle.core.Maths;
+import net.openhft.chronicle.queue.RollCycle;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.File;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoField;
+import java.time.temporal.TemporalAccessor;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
+
+public class RollingResourcesCache {
+<span class="fc" id="L36">    public static final ParseCount NO_PARSE_COUNT = new ParseCount(&quot;&quot;, Integer.MIN_VALUE);</span>
+<span class="fc" id="L37">    private static final int CACHE_SIZE = Integer.getInteger(&quot;chronicle.queue.rollingResourceCache.size&quot;, 128);</span>
+    private static final int ONE_DAY_IN_MILLIS = 86400000;
+    private static final int MAX_TIMESTAMP_CACHE_SIZE = 32;
+
+    @NotNull
+    private final Function&lt;String, File&gt; fileFactory;
+    @NotNull
+    private final DateTimeFormatter formatter;
+    @NotNull
+    private final Resource[] values;
+    private final int length;
+    @NotNull
+    private final Function&lt;File, String&gt; fileToName;
+    private final String format;
+<span class="fc" id="L51">    private final ConcurrentMap&lt;File, Long&gt; filenameToTimestampCache =</span>
+            new ConcurrentHashMap&lt;&gt;(MAX_TIMESTAMP_CACHE_SIZE);
+    private final long epoch;
+<span class="fc" id="L54">    private ParseCount lastParseCount = NO_PARSE_COUNT;</span>
+
+    public RollingResourcesCache(@NotNull final RollCycle cycle, long epoch,
+                                 @NotNull Function&lt;String, File&gt; nameToFile,
+                                 @NotNull Function&lt;File, String&gt; fileToName) {
+<span class="fc" id="L59">        this(cycle.lengthInMillis(), cycle.format(), epoch, nameToFile, fileToName);</span>
+<span class="fc" id="L60">    }</span>
+
+    private RollingResourcesCache(final int length,
+                                  @NotNull String format, long epoch,
+                                  @NotNull Function&lt;String, File&gt; nameToFile,
+<span class="fc" id="L65">                                  @NotNull Function&lt;File, String&gt; fileToName) {</span>
+<span class="fc" id="L66">        this.length = length;</span>
+<span class="fc" id="L67">        this.fileToName = fileToName;</span>
+<span class="fc" id="L68">        this.values = new Resource[CACHE_SIZE];</span>
+
+<span class="fc" id="L70">        final long millisInDay = epoch % ONE_DAY_IN_MILLIS;</span>
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        this.epoch = millisInDay &gt;= 0 ? epoch - millisInDay : -ONE_DAY_IN_MILLIS;</span>
+
+<span class="fc" id="L73">        this.format = format;</span>
+<span class="fc" id="L74">        this.formatter = DateTimeFormatter.ofPattern(this.format).withZone(ZoneId.of(&quot;UTC&quot;));</span>
+<span class="fc" id="L75">        this.fileFactory = nameToFile;</span>
+
+<span class="fc" id="L77">    }</span>
+
+    /**
+     * Cache some resources for a rollCycle number.
+     *
+     * @param cycle the rollCycle number to format
+     * @return the Resource
+     */
+    @NotNull
+    public Resource resourceFor(long cycle) {
+<span class="fc" id="L87">        long millisSinceBeginningOfEpoch = (cycle * length);</span>
+<span class="fc" id="L88">        int hash = Maths.hash32(millisSinceBeginningOfEpoch) &amp; (CACHE_SIZE - 1);</span>
+<span class="fc" id="L89">        Resource dv = values[hash];</span>
+<span class="fc bfc" id="L90" title="All 4 branches covered.">        if (dv == null || dv.millis != millisSinceBeginningOfEpoch) {</span>
+<span class="fc" id="L91">            final Instant instant = Instant.ofEpochMilli(millisSinceBeginningOfEpoch + epoch);</span>
+<span class="fc" id="L92">            @NotNull String text = formatter.format(instant);</span>
+<span class="fc" id="L93">            values[hash] = dv = new Resource(millisSinceBeginningOfEpoch, text, fileFactory.apply(text));</span>
+        }
+<span class="fc" id="L95">        return dv;</span>
+    }
+
+    public int parseCount(@NotNull String name) {
+<span class="fc" id="L99">        ParseCount last = this.lastParseCount;</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">        if (name.equals(last.name))</span>
+<span class="fc" id="L101">            return last.count;</span>
+<span class="fc" id="L102">        int count = parseCount0(name);</span>
+<span class="fc" id="L103">        lastParseCount = new ParseCount(name, count);</span>
+<span class="fc" id="L104">        return count;</span>
+    }
+
+    private int parseCount0(@NotNull String name) {
+        try {
+<span class="fc" id="L109">            TemporalAccessor parse = formatter.parse(name);</span>
+
+<span class="fc" id="L111">            long epochDay = parse.getLong(ChronoField.EPOCH_DAY) * 86400;</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">            if (parse.isSupported(ChronoField.SECOND_OF_DAY))</span>
+<span class="fc" id="L113">                epochDay += parse.getLong(ChronoField.SECOND_OF_DAY);</span>
+
+<span class="fc" id="L115">            return Maths.toInt32((epochDay - ((epoch) / 1000)) / (length / 1000));</span>
+<span class="fc" id="L116">        } catch (DateTimeParseException e) {</span>
+<span class="fc" id="L117">            throw new RuntimeException(String.format(</span>
+                    &quot;Unable to parse %s using format %s&quot;, name, format), e);
+        }
+    }
+
+    public Long toLong(File file) {
+<span class="fc" id="L123">        final Long cachedValue = filenameToTimestampCache.get(file);</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        if (cachedValue != null) {</span>
+<span class="fc" id="L125">            return cachedValue;</span>
+        }
+
+<span class="fc" id="L128">        final TemporalAccessor parse = formatter.parse(fileToName.apply(file));</span>
+        final long value;
+<span class="fc bfc" id="L130" title="All 2 branches covered.">        if (length == ONE_DAY_IN_MILLIS) {</span>
+<span class="fc" id="L131">            value = parse.getLong(ChronoField.EPOCH_DAY);</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        } else if (length &lt; ONE_DAY_IN_MILLIS) {</span>
+<span class="fc" id="L133">            value = Instant.from(parse).toEpochMilli() / length;</span>
+        } else {
+<span class="fc" id="L135">            long daysSinceEpoch = parse.getLong(ChronoField.EPOCH_DAY);</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">            long adjShift = daysSinceEpoch &lt; 0 ? -1 : 0;</span>
+<span class="fc" id="L137">            value = adjShift + ((daysSinceEpoch * 86400) / (length / 1000));</span>
+        }
+
+<span class="fc bfc" id="L140" title="All 2 branches covered.">        if (filenameToTimestampCache.size() &gt;= MAX_TIMESTAMP_CACHE_SIZE) {</span>
+<span class="fc" id="L141">            filenameToTimestampCache.clear();</span>
+        }
+<span class="fc" id="L143">        filenameToTimestampCache.put(file, value);</span>
+
+<span class="fc" id="L145">        return value;</span>
+    }
+
+    static class ParseCount {
+        final String name;
+        final int count;
+
+<span class="fc" id="L152">        public ParseCount(String name, int count) {</span>
+<span class="fc" id="L153">            this.name = name;</span>
+<span class="fc" id="L154">            this.count = count;</span>
+<span class="fc" id="L155">        }</span>
+    }
+
+    public static class Resource {
+        public final long millis;
+        public final String text;
+        public final File path;
+        public final File parentPath;
+        public boolean pathExists;
+
+<span class="fc" id="L165">        Resource(long millis, String text, File path) {</span>
+<span class="fc" id="L166">            this.millis = millis;</span>
+<span class="fc" id="L167">            this.text = text;</span>
+<span class="fc" id="L168">            this.path = path;</span>
+<span class="fc" id="L169">            this.parentPath = path.getParentFile();</span>
+<span class="fc" id="L170">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

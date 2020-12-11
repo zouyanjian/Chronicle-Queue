@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RollCycleEncodeSequence.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">RollCycleEncodeSequence.java</span></div><h1>RollCycleEncodeSequence.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.core.Maths;
+import net.openhft.chronicle.core.values.LongValue;
+import net.openhft.chronicle.core.values.TwoLongValue;
+import net.openhft.chronicle.wire.Sequence;
+
+class RollCycleEncodeSequence implements Sequence {
+    private final TwoLongValue writePositionAndSequence;
+    private final int cycleShift;
+    private final long sequenceMask;
+
+<span class="fc" id="L13">    RollCycleEncodeSequence(LongValue writePositionAndSequence, int indexCount, int indexSpacing) {</span>
+<span class="fc" id="L14">        this.cycleShift = Math.max(32, Maths.intLog2(indexCount) * 2 + Maths.intLog2(indexSpacing));</span>
+<span class="fc" id="L15">        this.sequenceMask = (1L &lt;&lt; cycleShift) - 1;</span>
+<span class="fc bfc" id="L16" title="All 2 branches covered.">        this.writePositionAndSequence = writePositionAndSequence instanceof TwoLongValue ?</span>
+                (TwoLongValue) writePositionAndSequence : null;
+<span class="fc" id="L18">    }</span>
+
+    @Override
+    public void setSequence(long sequence, long position) {
+<span class="pc bpc" id="L22" title="1 of 2 branches missed.">        if (writePositionAndSequence == null)</span>
+<span class="nc" id="L23">            return;</span>
+<span class="fc" id="L24">        long value = toLongValue(position, sequence);</span>
+<span class="fc" id="L25">        writePositionAndSequence.setOrderedValue2(value);</span>
+<span class="fc" id="L26">    }</span>
+
+    @Override
+    public long toIndex(long headerNumber, long sequence) {
+<span class="nc" id="L30">        long cycle = toLowerBitsWritePosition(headerNumber);</span>
+<span class="nc" id="L31">        return toLongValue(cycle, sequence);</span>
+    }
+
+    /**
+     * gets the sequence for a writePosition
+     * &lt;p&gt;
+     * This method will only return a valid sequence number of the write position if the write position is the
+     * last write position in the queue. YOU CAN NOT USE THIS METHOD TO LOOK UP RANDOM SEQUENCES FOR ANY WRITE POSITION.
+     * NOT_FOUND_RETRY will be return if a sequence number can not be found  ( so can retry )
+     * or NOT_FOUND when you should not retry
+     *
+     * @param forWritePosition the last write position, expected to be the end of queue
+     * @return NOT_FOUND_RETRY if the sequence for this write position can not be found, or NOT_FOUND if sequenceValue==null or the sequence for this {@code writePosition}
+     */
+    public long getSequence(long forWritePosition) {
+
+<span class="pc bpc" id="L47" title="1 of 2 branches missed.">        if (writePositionAndSequence == null)</span>
+<span class="nc" id="L48">            return Sequence.NOT_FOUND;</span>
+
+        // We only deal with the 2nd long in the TwoLongValue, and we use it to keep track of current position
+        // and current sequence. We use the same encoding as index (cycle number is shifted left by cycleShift
+        // and sequence number occupied the lower 64-cycleShift bits) but for this use case we mask and shift
+        // position into the space used for cycle number.
+
+        // todo optimize the maths in the method below
+
+<span class="fc" id="L57">        final long sequenceValue = this.writePositionAndSequence.getVolatileValue2();</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        if (sequenceValue == 0)</span>
+<span class="fc" id="L59">            return Sequence.NOT_FOUND;</span>
+
+<span class="fc" id="L61">        long writePositionAsCycle = toLongValue(forWritePosition, 0);</span>
+<span class="fc" id="L62">        long lowerBitsOfWp = toLowerBitsWritePosition(writePositionAsCycle);</span>
+<span class="fc" id="L63">        final long toLowerBitsWritePosition = toLowerBitsWritePosition(sequenceValue);</span>
+
+<span class="fc bfc" id="L65" title="All 2 branches covered.">        if (lowerBitsOfWp == toLowerBitsWritePosition)</span>
+<span class="fc" id="L66">            return toSequenceNumber(sequenceValue);</span>
+
+<span class="fc" id="L68">        return Sequence.NOT_FOUND_RETRY;</span>
+    }
+
+    private long toLongValue(long cycle, long sequenceNumber) {
+<span class="fc" id="L72">        return (cycle &lt;&lt; cycleShift) + (sequenceNumber &amp; sequenceMask);</span>
+    }
+
+    public long toSequenceNumber(long index) {
+<span class="fc" id="L76">        return index &amp; sequenceMask;</span>
+    }
+
+    private long toLowerBitsWritePosition(long index) {
+<span class="fc" id="L80">        return index &gt;&gt;&gt; cycleShift;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L85">        return &quot;RollCycleEncodeSequence{&quot; +</span>
+                &quot;writePositionAndSequence=&quot; + writePositionAndSequence +
+                &quot;, cycleShift=&quot; + cycleShift +
+                &quot;, sequenceMask=&quot; + sequenceMask +
+                '}';
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

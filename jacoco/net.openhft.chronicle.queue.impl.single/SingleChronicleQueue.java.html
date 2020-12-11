@@ -1,0 +1,1212 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleChronicleQueue.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">SingleChronicleQueue.java</span></div><h1>SingleChronicleQueue.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.bytes.*;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.analytics.AnalyticsFacade;
+import net.openhft.chronicle.core.annotation.PackageLocal;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.threads.CleaningThreadLocal;
+import net.openhft.chronicle.core.threads.EventLoop;
+import net.openhft.chronicle.core.threads.OnDemandEventLoop;
+import net.openhft.chronicle.core.threads.ThreadLocalHelper;
+import net.openhft.chronicle.core.time.TimeProvider;
+import net.openhft.chronicle.core.util.StringUtils;
+import net.openhft.chronicle.core.values.LongValue;
+import net.openhft.chronicle.queue.*;
+import net.openhft.chronicle.queue.impl.*;
+import net.openhft.chronicle.queue.impl.table.SingleTableStore;
+import net.openhft.chronicle.queue.internal.AnalyticsHolder;
+import net.openhft.chronicle.threads.DiskSpaceMonitor;
+import net.openhft.chronicle.threads.TimingPauser;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.lang.ref.WeakReference;
+import java.nio.channels.FileLock;
+import java.nio.channels.NonWritableChannelException;
+import java.security.SecureRandom;
+import java.text.ParseException;
+import java.time.ZoneId;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.*;
+
+import static net.openhft.chronicle.core.io.Closeable.closeQuietly;
+import static net.openhft.chronicle.queue.TailerDirection.NONE;
+import static net.openhft.chronicle.wire.Wires.*;
+
+public class SingleChronicleQueue extends AbstractCloseable implements RollingChronicleQueue {
+
+    public static final String SUFFIX = &quot;.cq4&quot;;
+    public static final String QUEUE_METADATA_FILE = &quot;metadata&quot; + SingleTableStore.SUFFIX;
+    public static final String DISK_SPACE_CHECKER_NAME = DiskSpaceMonitor.DISK_SPACE_CHECKER_NAME;
+
+<span class="fc" id="L71">    private static final Logger LOG = LoggerFactory.getLogger(SingleChronicleQueue.class);</span>
+
+<span class="fc" id="L73">    private static final boolean SHOULD_CHECK_CYCLE = Jvm.getBoolean(&quot;chronicle.queue.checkrollcycle&quot;);</span>
+    @NotNull
+    protected final EventLoop eventLoop;
+    @NotNull
+    protected final TableStore&lt;SCQMeta&gt; metaStore;
+    // Uses this.closers as a lock. concurrent read, locking for write.
+<span class="fc" id="L79">    private final Map&lt;BytesStore, LongValue&gt; metaStoreMap = new ConcurrentHashMap&lt;&gt;();</span>
+    final Supplier&lt;TimingPauser&gt; pauserSupplier;
+    final long timeoutMS;
+    @NotNull
+    final File path;
+    final String fileAbsolutePath;
+    private final StoreSupplier storeSupplier;
+<span class="fc" id="L86">    private final ThreadLocal&lt;WeakReference&lt;StoreTailer&gt;&gt; tlTailer = CleaningThreadLocal.withCleanup(wr -&gt; Closeable.closeQuietly(wr.get()));</span>
+    @NotNull
+    protected final WireStorePool pool;
+    private final long epoch;
+    private final boolean isBuffered;
+    @NotNull
+    private final WireType wireType;
+    private final long blockSize, overlapSize;
+    @NotNull
+    private final Consumer&lt;BytesRingBufferStats&gt; onRingBufferStats;
+    private final long bufferCapacity;
+    private final int indexSpacing;
+    private final int indexCount;
+    @NotNull
+    private final TimeProvider time;
+    @NotNull
+    private final BiFunction&lt;RollingChronicleQueue, Wire, SingleChronicleQueueStore&gt; storeFactory;
+<span class="fc" id="L103">    private final Set&lt;Closeable&gt; closers = Collections.newSetFromMap(new IdentityHashMap&lt;&gt;());</span>
+    private final boolean readOnly;
+    @NotNull
+    private final CycleCalculator cycleCalculator;
+    @Nullable
+    private final LongValue lastAcknowledgedIndexReplicated;
+    @Nullable
+    private final LongValue lastIndexReplicated;
+    @NotNull
+    private final DirectoryListing directoryListing;
+    @NotNull
+    private final QueueLock queueLock;
+    @NotNull
+    private final WriteLock writeLock;
+    private final boolean checkInterrupts;
+    @NotNull
+    private final RollingResourcesCache dateCache;
+    private final WriteLock appendLock;
+    protected int sourceId;
+<span class="fc" id="L122">    long firstAndLastCycleTime = 0;</span>
+<span class="fc" id="L123">    int firstCycle = Integer.MAX_VALUE, lastCycle = Integer.MIN_VALUE;</span>
+    protected final boolean doubleBuffer;
+    private final StoreFileListener storeFileListener;
+<span class="fc" id="L126">    protected final ThreadLocal&lt;ExcerptAppender&gt; strongExcerptAppenderThreadLocal = CleaningThreadLocal.withCloseQuietly(this::newAppender);</span>
+    @NotNull
+    private final RollCycle rollCycle;
+    private final int deltaCheckpointInterval;
+
+<span class="fc" id="L131">    protected SingleChronicleQueue(@NotNull final SingleChronicleQueueBuilder builder) {</span>
+        try {
+<span class="fc" id="L133">            rollCycle = builder.rollCycle();</span>
+<span class="fc" id="L134">            cycleCalculator = cycleCalculator(builder.rollTimeZone());</span>
+<span class="fc" id="L135">            epoch = builder.epoch();</span>
+<span class="fc" id="L136">            dateCache = new RollingResourcesCache(rollCycle, epoch, textToFile(builder), fileToText());</span>
+
+<span class="fc" id="L138">            storeFileListener = builder.storeFileListener();</span>
+<span class="fc" id="L139">            storeSupplier = new StoreSupplier();</span>
+<span class="fc" id="L140">            pool = WireStorePool.withSupplier(storeSupplier, storeFileListener);</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">            isBuffered = BufferMode.Asynchronous == builder.writeBufferMode();</span>
+<span class="fc" id="L142">            path = builder.path();</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">            if (!builder.readOnly())</span>
+                //noinspection ResultOfMethodCallIgnored
+<span class="fc" id="L145">                path.mkdirs();</span>
+<span class="fc" id="L146">            fileAbsolutePath = path.getAbsolutePath();</span>
+<span class="fc" id="L147">            wireType = builder.wireType();</span>
+<span class="fc" id="L148">            blockSize = builder.blockSize();</span>
+<span class="fc" id="L149">            overlapSize = Math.max(64 &lt;&lt; 10, builder.blockSize() / 4);</span>
+<span class="fc" id="L150">            eventLoop = builder.eventLoop();</span>
+<span class="fc" id="L151">            bufferCapacity = builder.bufferCapacity();</span>
+<span class="fc" id="L152">            onRingBufferStats = builder.onRingBufferStats();</span>
+<span class="fc" id="L153">            indexCount = builder.indexCount();</span>
+<span class="fc" id="L154">            indexSpacing = builder.indexSpacing();</span>
+<span class="fc" id="L155">            time = builder.timeProvider();</span>
+<span class="fc" id="L156">            pauserSupplier = builder.pauserSupplier();</span>
+            // add a 10% random element to make it less likely threads will timeout at the same time.
+<span class="fc" id="L158">            timeoutMS = (long) (builder.timeoutMS() * (1 + 0.2 * new SecureRandom().nextFloat())); // Not time critical</span>
+<span class="fc" id="L159">            storeFactory = builder.storeFactory();</span>
+<span class="fc" id="L160">            checkInterrupts = builder.checkInterrupts();</span>
+<span class="fc" id="L161">            metaStore = builder.metaStore();</span>
+<span class="fc" id="L162">            doubleBuffer = builder.doubleBuffer();</span>
+<span class="fc bfc" id="L163" title="All 4 branches covered.">            if (metaStore.readOnly() &amp;&amp; !builder.readOnly()) {</span>
+<span class="fc" id="L164">                LOG.warn(&quot;Forcing queue to be readOnly&quot;);</span>
+                // need to set this on builder as it is used elsewhere
+<span class="fc" id="L166">                builder.readOnly(metaStore.readOnly());</span>
+            }
+<span class="fc" id="L168">            readOnly = builder.readOnly();</span>
+
+<span class="fc bfc" id="L170" title="All 2 branches covered.">            if (readOnly) {</span>
+<span class="fc" id="L171">                this.directoryListing = new FileSystemDirectoryListing(path, fileToCycleFunction());</span>
+            } else {
+<span class="fc" id="L173">                this.directoryListing = new TableDirectoryListing(metaStore, path.toPath(), fileToCycleFunction(), false);</span>
+<span class="fc" id="L174">                directoryListing.init();</span>
+            }
+
+<span class="fc" id="L177">            this.directoryListing.refresh(true);</span>
+<span class="fc" id="L178">            this.queueLock = builder.queueLock();</span>
+<span class="fc" id="L179">            this.writeLock = builder.writeLock();</span>
+
+            // release the write lock if the process is dead
+<span class="fc bfc" id="L182" title="All 2 branches covered.">            if (writeLock instanceof TableStoreWriteLock) {</span>
+<span class="fc" id="L183">                ((TableStoreWriteLock) writeLock).forceUnlockIfProcessIsDead();</span>
+            }
+
+<span class="fc" id="L186">            this.appendLock = builder.appendLock();</span>
+
+<span class="fc bfc" id="L188" title="All 2 branches covered.">            if (readOnly) {</span>
+<span class="fc" id="L189">                this.lastIndexReplicated = null;</span>
+<span class="fc" id="L190">                this.lastAcknowledgedIndexReplicated = null;</span>
+            } else {
+<span class="fc" id="L192">                this.lastIndexReplicated = metaStore.doWithExclusiveLock(ts -&gt; ts.acquireValueFor(&quot;chronicle.lastIndexReplicated&quot;, -1L));</span>
+<span class="fc" id="L193">                this.lastAcknowledgedIndexReplicated = metaStore.doWithExclusiveLock(ts -&gt; ts.acquireValueFor(&quot;chronicle.lastAcknowledgedIndexReplicated&quot;, -1L));</span>
+            }
+
+<span class="fc" id="L196">            this.deltaCheckpointInterval = builder.deltaCheckpointInterval();</span>
+
+<span class="fc" id="L198">            sourceId = builder.sourceId();</span>
+
+<span class="fc" id="L200">            final Map&lt;String, String&gt; additionalEventParameters = AnalyticsFacade.standardAdditionalProperties();</span>
+<span class="fc" id="L201">            additionalEventParameters.put(&quot;wire_type&quot;, wireType.toString());</span>
+<span class="fc" id="L202">            final String rollCycleName = rollCycle.toString();</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">            if (!rollCycleName.startsWith(&quot;TEST&quot;))</span>
+<span class="fc" id="L204">                additionalEventParameters.put(&quot;roll_cycle&quot;, rollCycleName);</span>
+
+<span class="fc" id="L206">            AnalyticsHolder.instance().sendEvent(&quot;started&quot;, additionalEventParameters);</span>
+<span class="nc" id="L207">        } catch (Throwable t) {</span>
+<span class="nc" id="L208">            close();</span>
+<span class="nc" id="L209">            throw Jvm.rethrow(t);</span>
+<span class="fc" id="L210">        }</span>
+<span class="fc" id="L211">    }</span>
+
+    protected CycleCalculator cycleCalculator(ZoneId zoneId) {
+<span class="fc" id="L214">        return DefaultCycleCalculator.INSTANCE;</span>
+    }
+
+    @NotNull
+    StoreTailer acquireTailer() {
+<span class="fc" id="L219">        return ThreadLocalHelper.getTL(tlTailer, this, q -&gt; new StoreTailer(q, q.pool));</span>
+    }
+
+    @NotNull
+    private Function&lt;String, File&gt; textToFile(@NotNull SingleChronicleQueueBuilder builder) {
+<span class="fc" id="L224">        return name -&gt; new File(builder.path(), name + SUFFIX);</span>
+    }
+
+    @NotNull
+    private Function&lt;File, String&gt; fileToText() {
+<span class="fc" id="L229">        return file -&gt; {</span>
+<span class="fc" id="L230">            String name = file.getName();</span>
+<span class="fc" id="L231">            return name.substring(0, name.length() - SUFFIX.length());</span>
+        };
+    }
+
+    @Override
+    public int sourceId() {
+<span class="fc" id="L237">        return sourceId;</span>
+    }
+
+    /**
+     * when using replication to another host, this is the highest last index that has been confirmed to have been read by all of the remote host(s).
+     */
+    @Override
+    public long lastAcknowledgedIndexReplicated() {
+        // throwExceptionIfClosed();
+
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">        return lastAcknowledgedIndexReplicated == null ? -1 : lastAcknowledgedIndexReplicated.getVolatileValue(-1);</span>
+    }
+
+    @Override
+    public void lastAcknowledgedIndexReplicated(long newValue) {
+        // throwExceptionIfClosed();
+
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">        if (lastAcknowledgedIndexReplicated != null)</span>
+<span class="fc" id="L255">            lastAcknowledgedIndexReplicated.setMaxValue(newValue);</span>
+<span class="fc" id="L256">    }</span>
+
+    @Override
+    public void refreshDirectoryListing() {
+<span class="fc" id="L260">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L262">        directoryListing.refresh(true);</span>
+<span class="fc" id="L263">        firstCycle = directoryListing.getMinCreatedCycle();</span>
+<span class="fc" id="L264">        lastCycle = directoryListing.getMaxCreatedCycle();</span>
+<span class="fc" id="L265">    }</span>
+
+    /**
+     * when using replication to another host, this is the maxiumum last index that has been sent to any of the remote host(s).
+     */
+    @Override
+    public long lastIndexReplicated() {
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        return lastIndexReplicated == null ? -1 : lastIndexReplicated.getVolatileValue(-1);</span>
+    }
+
+    @Override
+    public void lastIndexReplicated(long indexReplicated) {
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        if (lastIndexReplicated != null)</span>
+<span class="nc" id="L278">            lastIndexReplicated.setMaxValue(indexReplicated);</span>
+<span class="nc" id="L279">    }</span>
+
+    @Override
+    public void clear() {
+<span class="nc" id="L283">        throw new UnsupportedOperationException(&quot;Not yet implemented&quot;);</span>
+    }
+
+    @Override
+    @NotNull
+    public File file() {
+<span class="fc" id="L289">        return path;</span>
+    }
+
+    @NotNull
+    @Override
+    public String fileAbsolutePath() {
+<span class="fc" id="L295">        return fileAbsolutePath;</span>
+    }
+
+    @Override
+    public @NotNull String dumpLastHeader() {
+<span class="nc" id="L300">        StringBuilder sb = new StringBuilder(256);</span>
+<span class="nc" id="L301">        try (SingleChronicleQueueStore wireStore = storeForCycle(lastCycle(), epoch, false, null)) {</span>
+<span class="nc" id="L302">            sb.append(wireStore.dumpHeader());</span>
+        }
+<span class="nc" id="L304">        return sb.toString();</span>
+    }
+
+    @NotNull
+    @Override
+    public String dump() {
+<span class="fc" id="L310">        StringBuilder sb = new StringBuilder(1024);</span>
+<span class="fc" id="L311">        sb.append(metaStore.dump());</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">        for (int i = firstCycle(), max = lastCycle(); i &lt;= max; i++) {</span>
+<span class="fc" id="L313">            try (SingleChronicleQueueStore commonStore = storeForCycle(i, epoch, false, null)) {</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">                if (commonStore != null)</span>
+<span class="fc" id="L315">                    sb.append(commonStore.dump());</span>
+            }
+        }
+<span class="fc" id="L318">        return sb.toString();</span>
+    }
+
+    @Override
+    public void dump(@NotNull Writer writer, long fromIndex, long toIndex) {
+        try {
+<span class="nc" id="L324">            long firstIndex = firstIndex();</span>
+<span class="nc" id="L325">            writer.append(&quot;# firstIndex: &quot;).append(Long.toHexString(firstIndex)).append(&quot;\n&quot;);</span>
+<span class="nc" id="L326">            ExcerptTailer tailer = createTailer();</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">            if (!tailer.moveToIndex(fromIndex)) {</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                if (firstIndex &gt; fromIndex) {</span>
+<span class="nc" id="L329">                    tailer.toStart();</span>
+                } else {
+<span class="nc" id="L331">                    return;</span>
+                }
+            }
+<span class="nc" id="L334">            Bytes bytes = acquireBytes();</span>
+<span class="nc" id="L335">            TextWire text = new TextWire(bytes);</span>
+            while (true) {
+<span class="nc" id="L337">                try (DocumentContext dc = tailer.readingDocument()) {</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">                    if (!dc.isPresent()) {</span>
+<span class="nc" id="L339">                        writer.append(&quot;# no more messages at &quot;).append(Long.toHexString(dc.index())).append(&quot;\n&quot;);</span>
+<span class="nc" id="L340">                        return;</span>
+                    }
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                    if (dc.index() &gt; toIndex)</span>
+<span class="nc" id="L343">                        return;</span>
+<span class="nc" id="L344">                    writer.append(&quot;# index: &quot;).append(Long.toHexString(dc.index())).append(&quot;\n&quot;);</span>
+<span class="nc" id="L345">                    Wire wire = dc.wire();</span>
+<span class="nc" id="L346">                    long start = wire.bytes().readPosition();</span>
+                    try {
+<span class="nc" id="L348">                        text.clear();</span>
+<span class="nc" id="L349">                        wire.copyTo(text);</span>
+<span class="nc" id="L350">                        writer.append(bytes.toString());</span>
+
+<span class="nc" id="L352">                    } catch (Exception e) {</span>
+<span class="nc" id="L353">                        wire.bytes().readPosition(start);</span>
+<span class="nc" id="L354">                        writer.append(wire.bytes()).append(&quot;\n&quot;);</span>
+<span class="nc" id="L355">                    }</span>
+<span class="nc" id="L356">                }</span>
+            }
+<span class="nc" id="L358">        } catch (Exception e) {</span>
+<span class="nc" id="L359">            e.printStackTrace(new PrintWriter(writer));</span>
+
+        } finally {
+            try {
+<span class="nc" id="L363">                writer.flush();</span>
+<span class="nc" id="L364">            } catch (IOException e) {</span>
+<span class="nc" id="L365">                LoggerFactory.getLogger(SingleChronicleQueue.class).debug(&quot;&quot;, e);</span>
+<span class="nc" id="L366">            }</span>
+        }
+<span class="nc" id="L368">    }</span>
+
+    @Override
+    public int indexCount() {
+<span class="fc" id="L372">        return indexCount;</span>
+    }
+
+    @Override
+    public int indexSpacing() {
+<span class="fc" id="L377">        return indexSpacing;</span>
+    }
+
+    @Override
+    public long epoch() {
+<span class="fc" id="L382">        return epoch;</span>
+    }
+
+    @Override
+    @NotNull
+    public RollCycle rollCycle() {
+<span class="fc" id="L388">        return this.rollCycle;</span>
+    }
+
+    @Override
+    public int deltaCheckpointInterval() {
+<span class="nc" id="L393">        return deltaCheckpointInterval;</span>
+    }
+
+    /**
+     * @return if we uses a ring buffer to buffer the appends, the Excerpts are written to the Chronicle Queue using a background thread
+     */
+    public boolean buffered() {
+<span class="nc" id="L400">        return this.isBuffered;</span>
+    }
+
+    @NotNull
+    public EventLoop eventLoop() {
+<span class="nc" id="L405">        return this.eventLoop;</span>
+    }
+
+    @NotNull
+    protected ExcerptAppender newAppender() {
+
+<span class="fc" id="L411">        queueLock.waitForLock();</span>
+
+<span class="fc" id="L413">        final WireStorePool newPool = WireStorePool.withSupplier(storeSupplier, storeFileListener);</span>
+<span class="fc" id="L414">        return new StoreAppender(this, newPool, checkInterrupts);</span>
+    }
+
+    protected StoreFileListener storeFileListener() {
+<span class="nc" id="L418">        return storeFileListener;</span>
+    }
+
+    // used by enterprise CQ
+    WireStoreSupplier storeSupplier() {
+<span class="nc" id="L423">        return storeSupplier;</span>
+    }
+
+    @NotNull
+    @Override
+    public ExcerptAppender acquireAppender() {
+<span class="fc" id="L429">        throwExceptionIfClosed();</span>
+<span class="fc bfc" id="L430" title="All 2 branches covered.">        if (readOnly)</span>
+<span class="fc" id="L431">            throw new IllegalStateException(&quot;Can't append to a read-only chronicle&quot;);</span>
+
+<span class="fc" id="L433">        return strongExcerptAppenderThreadLocal.get();</span>
+    }
+
+    /**
+     * @return the {@link QueueLock} that is used to lock changes to queue state e.g. the addition of a new appender
+     */
+    @Override
+    @NotNull
+    public QueueLock queueLock() {
+<span class="nc" id="L442">        return queueLock;</span>
+    }
+
+    /**
+     * @return the {@link WriteLock} that is used to lock writes to the queue. This is the mechanism used to
+     * coordinate writes from multiple threads and processes
+     */
+    @NotNull
+    WriteLock writeLock() {
+<span class="fc" id="L451">        return writeLock;</span>
+    }
+
+    /**
+     * @return the {@link WriteLock} that is used to lock appends. This is only used by Queue Enterprise
+     * sink replication handlers. See Queue Enterprise docs for more details.
+     */
+    public WriteLock appendLock() {
+<span class="fc" id="L459">        return appendLock;</span>
+    }
+
+    @NotNull
+    @Override
+    public ExcerptTailer createTailer(String id) {
+<span class="fc" id="L465">        throwExceptionIfClosed();</span>
+
+<span class="fc bfc" id="L467" title="All 2 branches covered.">        LongValue index = id == null</span>
+                ? null
+<span class="fc" id="L469">                : metaStore.doWithExclusiveLock(ts -&gt; ts.acquireValueFor(&quot;index.&quot; + id, 0));</span>
+<span class="fc" id="L470">        final StoreTailer storeTailer = new StoreTailer(this, pool, index);</span>
+<span class="fc" id="L471">        directoryListing.refresh(true);</span>
+<span class="fc" id="L472">        storeTailer.clearUsedByThread();</span>
+<span class="fc" id="L473">        return storeTailer;</span>
+    }
+
+    @NotNull
+    @Override
+    public ExcerptTailer createTailer() {
+<span class="fc" id="L479">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L481">        return createTailer(null);</span>
+    }
+
+    @Nullable
+    @Override
+    public final SingleChronicleQueueStore storeForCycle(int cycle, final long epoch, boolean createIfAbsent, SingleChronicleQueueStore oldStore) {
+<span class="fc" id="L487">        return this.pool.acquire(cycle, epoch, createIfAbsent, oldStore);</span>
+    }
+
+    @Override
+    public int nextCycle(int cycle, @NotNull TailerDirection direction) throws ParseException {
+<span class="fc" id="L492">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L494">        return pool.nextCycle(cycle, direction);</span>
+    }
+
+    public long exceptsPerCycle(int cycle) {
+<span class="fc" id="L498">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L500">        StoreTailer tailer = acquireTailer();</span>
+        try {
+<span class="fc" id="L502">            long index = rollCycle.toIndex(cycle, 0);</span>
+<span class="fc bfc" id="L503" title="All 2 branches covered.">            if (tailer.moveToIndex(index)) {</span>
+<span class="fc" id="L504">                return tailer.store.lastSequenceNumber(tailer) + 1;</span>
+            } else {
+<span class="fc" id="L506">                return -1;</span>
+            }
+<span class="nc" id="L508">        } catch (StreamCorruptedException e) {</span>
+<span class="nc" id="L509">            throw new IllegalStateException(e);</span>
+        } finally {
+<span class="fc" id="L511">            tailer.releaseStore();</span>
+        }
+    }
+
+    /**
+     * Will give you the number of excerpts between 2 index?s ( as exists on the current file system ). If intermediate chronicle files are removed
+     * this will effect the result.
+     *
+     * @param fromIndex the lower index
+     * @param toIndex   the higher index
+     * @return will give you the number of excerpts between 2 index?s. It?s not as simple as just subtracting one number from the other.
+     * @throws IllegalStateException if we are not able to read the chronicle files
+     */
+    @Override
+    public long countExcerpts(long fromIndex, long toIndex) throws IllegalStateException {
+<span class="fc" id="L526">        throwExceptionIfClosed();</span>
+
+<span class="fc bfc" id="L528" title="All 2 branches covered.">        if (fromIndex &gt; toIndex) {</span>
+<span class="fc" id="L529">            long temp = fromIndex;</span>
+<span class="fc" id="L530">            fromIndex = toIndex;</span>
+<span class="fc" id="L531">            toIndex = temp;</span>
+        }
+
+        // if the are the same
+<span class="fc bfc" id="L535" title="All 2 branches covered.">        if (fromIndex == toIndex)</span>
+<span class="fc" id="L536">            return 0;</span>
+
+<span class="fc" id="L538">        long result = 0;</span>
+
+        // some of the sequences maybe at -1 so we will add 1 to the cycle and update the result
+        // accordingly
+<span class="fc" id="L542">        RollCycle rollCycle = rollCycle();</span>
+<span class="fc" id="L543">        long sequenceNotSet = rollCycle.toSequenceNumber(-1);</span>
+
+<span class="fc bfc" id="L545" title="All 2 branches covered.">        if (rollCycle.toSequenceNumber(fromIndex) == sequenceNotSet) {</span>
+<span class="fc" id="L546">            result++;</span>
+<span class="fc" id="L547">            fromIndex++;</span>
+        }
+
+<span class="fc bfc" id="L550" title="All 2 branches covered.">        if (rollCycle.toSequenceNumber(toIndex) == sequenceNotSet) {</span>
+<span class="fc" id="L551">            result--;</span>
+<span class="fc" id="L552">            toIndex++;</span>
+        }
+
+<span class="fc" id="L555">        int lowerCycle = rollCycle.toCycle(fromIndex);</span>
+<span class="fc" id="L556">        int upperCycle = rollCycle.toCycle(toIndex);</span>
+
+<span class="fc bfc" id="L558" title="All 2 branches covered.">        if (lowerCycle == upperCycle)</span>
+<span class="fc" id="L559">            return toIndex - fromIndex;</span>
+
+<span class="fc" id="L561">        long upperSeqNum = rollCycle.toSequenceNumber(toIndex);</span>
+<span class="fc" id="L562">        long lowerSeqNum = rollCycle.toSequenceNumber(fromIndex);</span>
+
+<span class="fc bfc" id="L564" title="All 2 branches covered.">        if (lowerCycle + 1 == upperCycle) {</span>
+<span class="fc" id="L565">            long l = exceptsPerCycle(lowerCycle);</span>
+<span class="fc" id="L566">            result += (l - lowerSeqNum) + upperSeqNum;</span>
+<span class="fc" id="L567">            return result;</span>
+        }
+
+        NavigableSet&lt;Long&gt; cycles;
+        try {
+<span class="fc" id="L572">            cycles = listCyclesBetween(lowerCycle, upperCycle);</span>
+<span class="fc" id="L573">        } catch (Exception e) {</span>
+<span class="fc" id="L574">            throw new IllegalStateException(e);</span>
+<span class="fc" id="L575">        }</span>
+
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">        if (cycles.first() == lowerCycle) {</span>
+            // because we are inclusive, for example  if we were at the end, then this
+            // is 1 except rather than zero
+<span class="fc" id="L580">            long l = exceptsPerCycle(lowerCycle);</span>
+<span class="fc" id="L581">            result += (l - lowerSeqNum);</span>
+<span class="fc" id="L582">        } else</span>
+<span class="nc" id="L583">            throw new IllegalStateException(&quot;Cycle not found, lower-cycle=&quot; + Long.toHexString(lowerCycle));</span>
+
+<span class="pc bpc" id="L585" title="1 of 2 branches missed.">        if (cycles.last() == upperCycle) {</span>
+<span class="fc" id="L586">            result += upperSeqNum;</span>
+        } else
+<span class="nc" id="L588">            throw new IllegalStateException(&quot;Cycle not found,  upper-cycle=&quot; + Long.toHexString(upperCycle));</span>
+
+<span class="fc bfc" id="L590" title="All 2 branches covered.">        if (cycles.size() == 2)</span>
+<span class="fc" id="L591">            return result;</span>
+
+<span class="fc" id="L593">        final long[] array = cycles.stream().mapToLong(i -&gt; i).toArray();</span>
+<span class="fc bfc" id="L594" title="All 2 branches covered.">        for (int i = 1; i &lt; array.length - 1; i++) {</span>
+<span class="fc" id="L595">            long x = exceptsPerCycle(Math.toIntExact(array[i]));</span>
+<span class="fc" id="L596">            result += x;</span>
+        }
+
+<span class="fc" id="L599">        return result;</span>
+    }
+
+    public NavigableSet&lt;Long&gt; listCyclesBetween(int lowerCycle, int upperCycle) throws ParseException {
+<span class="fc" id="L603">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L605">        return pool.listCyclesBetween(lowerCycle, upperCycle);</span>
+    }
+
+    public &lt;T&gt; void addCloseListener(Closeable key) {
+<span class="fc" id="L609">        synchronized (closers) {</span>
+<span class="fc bfc" id="L610" title="All 2 branches covered.">            if (!closers.isEmpty())</span>
+<span class="fc" id="L611">                closers.removeIf(Closeable::isClosed);</span>
+<span class="fc" id="L612">            closers.add(key);</span>
+<span class="fc" id="L613">        }</span>
+<span class="fc" id="L614">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @Override
+    protected void performClose() {
+<span class="fc" id="L619">        synchronized (closers) {</span>
+<span class="fc" id="L620">            metaStoreMap.values().forEach(Closeable::closeQuietly);</span>
+<span class="fc" id="L621">            metaStoreMap.clear();</span>
+<span class="fc" id="L622">            closers.forEach(Closeable::closeQuietly);</span>
+<span class="fc" id="L623">            closers.clear();</span>
+
+            // must be closed after closers.
+<span class="fc" id="L626">            closeQuietly(directoryListing,</span>
+                    queueLock,
+                    lastAcknowledgedIndexReplicated,
+                    lastIndexReplicated,
+                    writeLock,
+                    appendLock,
+                    pool,
+                    metaStore,
+                    storeSupplier);
+<span class="fc" id="L635">        }</span>
+
+        // close it if we created it.
+<span class="pc bpc" id="L638" title="1 of 2 branches missed.">        if (eventLoop instanceof OnDemandEventLoop)</span>
+<span class="fc" id="L639">            eventLoop.close();</span>
+<span class="fc" id="L640">    }</span>
+
+    @Override
+    protected void finalize() throws Throwable {
+<span class="fc" id="L644">        super.finalize();</span>
+<span class="fc" id="L645">        warnAndCloseIfNotClosed();</span>
+<span class="fc" id="L646">    }</span>
+
+    public final void closeStore(@Nullable SingleChronicleQueueStore store) {
+<span class="pc bpc" id="L649" title="1 of 2 branches missed.">        if (store != null)</span>
+<span class="fc" id="L650">            this.pool.closeStore(store);</span>
+<span class="fc" id="L651">    }</span>
+
+    @Override
+    public final int cycle() {
+<span class="fc" id="L655">        return cycleCalculator.currentCycle(rollCycle, time, epoch);</span>
+    }
+
+    public final int cycle(TimeProvider timeProvider) {
+<span class="fc" id="L659">        return cycleCalculator.currentCycle(rollCycle, timeProvider, epoch);</span>
+    }
+
+    @Override
+    public long firstIndex() {
+        // TODO - as discussed, peter is going find another way to do this as this solution
+        // currently breaks tests in chronicle engine - see net.openhft.chronicle.engine.queue.LocalQueueRefTest
+
+<span class="fc" id="L667">        int cycle = firstCycle();</span>
+<span class="fc bfc" id="L668" title="All 2 branches covered.">        if (cycle == Integer.MAX_VALUE)</span>
+<span class="fc" id="L669">            return Long.MAX_VALUE;</span>
+
+<span class="fc" id="L671">        return rollCycle().toIndex(cycle, 0);</span>
+    }
+
+    @Override
+    public long entryCount() {
+<span class="fc" id="L676">        final ExcerptTailer tailer = createTailer();</span>
+<span class="fc" id="L677">        tailer.toEnd();</span>
+<span class="fc" id="L678">        long lastIndex = tailer.index();</span>
+<span class="fc bfc" id="L679" title="All 2 branches covered.">        if (lastIndex == 0)</span>
+<span class="fc" id="L680">            return 0;</span>
+<span class="fc" id="L681">        return countExcerpts(firstIndex(), lastIndex);</span>
+    }
+
+    @Nullable
+    String[] getList() {
+<span class="nc" id="L686">        return path.list();</span>
+    }
+
+    private void setFirstAndLastCycle() {
+<span class="fc" id="L690">        long now = System.currentTimeMillis();</span>
+<span class="fc bfc" id="L691" title="All 2 branches covered.">        if (now &lt;= firstAndLastCycleTime) {</span>
+<span class="fc" id="L692">            return;</span>
+        }
+
+<span class="fc bfc" id="L695" title="All 2 branches covered.">        directoryListing.refresh(now - firstAndLastCycleTime &gt; 60_000);</span>
+<span class="fc" id="L696">        firstCycle = directoryListing.getMinCreatedCycle();</span>
+<span class="fc" id="L697">        lastCycle = directoryListing.getMaxCreatedCycle();</span>
+
+<span class="fc" id="L699">        firstAndLastCycleTime = now;</span>
+<span class="fc" id="L700">    }</span>
+
+    @Override
+    public int firstCycle() {
+<span class="fc" id="L704">        setFirstAndLastCycle();</span>
+<span class="fc" id="L705">        return firstCycle;</span>
+    }
+
+    /**
+     * allows the appenders to inform the queue that they have rolled
+     *
+     * @param cycle the cycle the appender has rolled to
+     */
+    void onRoll(int cycle) {
+<span class="fc bfc" id="L714" title="All 2 branches covered.">        if (lastCycle &lt; cycle)</span>
+<span class="fc" id="L715">            lastCycle = cycle;</span>
+<span class="fc bfc" id="L716" title="All 2 branches covered.">        if (firstCycle &gt; cycle)</span>
+<span class="fc" id="L717">            firstCycle = cycle;</span>
+<span class="fc" id="L718">    }</span>
+
+    @Override
+    public int lastCycle() {
+<span class="fc" id="L722">        setFirstAndLastCycle();</span>
+<span class="fc" id="L723">        return lastCycle;</span>
+    }
+
+    protected int fileToCycle(final File queueFile) {
+<span class="nc" id="L727">        return fileToCycleFunction().applyAsInt(queueFile);</span>
+    }
+
+    @NotNull
+    public Consumer&lt;BytesRingBufferStats&gt; onRingBufferStats() {
+<span class="nc" id="L732">        return this.onRingBufferStats;</span>
+    }
+
+    public long blockSize() {
+<span class="fc" id="L736">        return this.blockSize;</span>
+    }
+
+    // *************************************************************************
+    //
+    // *************************************************************************
+
+    public long overlapSize() {
+<span class="fc" id="L744">        return this.overlapSize;</span>
+    }
+
+    @NotNull
+    @Override
+    public WireType wireType() {
+<span class="fc" id="L750">        return wireType;</span>
+    }
+
+    public long bufferCapacity() {
+<span class="nc" id="L754">        return this.bufferCapacity;</span>
+    }
+
+    @NotNull
+    @PackageLocal
+    MappedFile mappedFile(File file) throws FileNotFoundException {
+<span class="fc" id="L760">        long chunkSize = OS.pageAlign(blockSize);</span>
+<span class="fc" id="L761">        long overlapSize = OS.pageAlign(blockSize / 4);</span>
+<span class="fc" id="L762">        return MappedFile.of(file, chunkSize, overlapSize, readOnly);</span>
+    }
+
+    boolean isReadOnly() {
+<span class="nc" id="L766">        return readOnly;</span>
+    }
+
+    private int toCycle(@Nullable Map.Entry&lt;Long, File&gt; entry) {
+<span class="pc bpc" id="L770" title="1 of 4 branches missed.">        if (entry == null || entry.getValue() == null)</span>
+<span class="fc" id="L771">            return -1;</span>
+<span class="fc" id="L772">        return dateCache.parseCount(fileToText().apply(entry.getValue()));</span>
+    }
+
+    @NotNull
+    @Override
+    public String toString() {
+<span class="nc" id="L778">        return this.getClass().getSimpleName() + &quot;{&quot; +</span>
+                &quot;sourceId=&quot; + sourceId +
+                &quot;, file=&quot; + path +
+                '}';
+    }
+
+    @NotNull
+    public TimeProvider time() {
+<span class="fc" id="L786">        return time;</span>
+    }
+
+    @NotNull
+    private ToIntFunction&lt;File&gt; fileToCycleFunction() {
+<span class="fc" id="L791">        return f -&gt; {</span>
+<span class="fc" id="L792">            final String name = f.getName();</span>
+<span class="fc" id="L793">            return dateCache.parseCount(name.substring(0, name.length() - SUFFIX.length()));</span>
+        };
+    }
+
+    void removeCloseListener(final StoreTailer storeTailer) {
+<span class="nc" id="L798">        synchronized (closers) {</span>
+<span class="nc" id="L799">            closers.remove(storeTailer);</span>
+<span class="nc" id="L800">        }</span>
+<span class="nc" id="L801">    }</span>
+
+    public TableStore metaStore() {
+<span class="nc" id="L804">        return metaStore;</span>
+    }
+
+    void cleanupStoreFilesWithNoData() {
+
+<span class="fc" id="L809">        writeLock.lock();</span>
+
+        try {
+<span class="fc" id="L812">            int cycle = cycle();</span>
+<span class="pc bfc" id="L813" title="All 4 branches covered.">            for (int lastCycle = lastCycle(); lastCycle &lt; cycle &amp;&amp; lastCycle &gt;= 0; lastCycle--) {</span>
+<span class="fc" id="L814">                try (final SingleChronicleQueueStore store = this.pool.acquire(lastCycle, epoch(), false, null)) {</span>
+                    // file not found.
+<span class="pc bpc" id="L816" title="1 of 2 branches missed.">                    if (store == null)</span>
+                        break;
+<span class="pc bpc" id="L818" title="3 of 6 branches missed.">                    if (store.writePosition() == 0 &amp;&amp; !store.file().delete() &amp;&amp; store.file().exists()) {</span>
+                        // couldn't delete? Let's try writing EOF
+                        // if this blows up we should blow up too so don't catch anything
+<span class="nc" id="L821">                        MappedBytes bytes = store.bytes();</span>
+                        try {
+<span class="nc" id="L823">                            store.writeEOFAndShrink(wireType.apply(bytes), timeoutMS);</span>
+                        } finally {
+<span class="nc" id="L825">                            bytes.releaseLast();</span>
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+<span class="fc" id="L832">            directoryListing.refresh(true);</span>
+<span class="fc" id="L833">            firstAndLastCycleTime = 0;</span>
+        } finally {
+<span class="fc" id="L835">            writeLock.unlock();</span>
+        }
+<span class="fc" id="L837">    }</span>
+
+    @Override
+    protected boolean threadSafetyCheck(boolean isUsed) {
+        // component is thread safe
+<span class="fc" id="L842">        return true;</span>
+    }
+
+    public void tableStorePut(CharSequence key, long index) {
+<span class="fc" id="L846">        LongValue longValue = tableStoreAcquire(key, index);</span>
+<span class="pc bpc" id="L847" title="1 of 2 branches missed.">        if (longValue == null) return;</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">        if (index == Long.MIN_VALUE)</span>
+<span class="nc" id="L849">            longValue.setVolatileValue(index);</span>
+        else
+<span class="nc" id="L851">            longValue.setMaxValue(index);</span>
+<span class="nc" id="L852">    }</span>
+
+    @Nullable
+    protected LongValue tableStoreAcquire(CharSequence key, long index) {
+
+<span class="fc" id="L857">        BytesStore keyBytes = asBytes(key);</span>
+<span class="fc" id="L858">        LongValue longValue = metaStoreMap.get(keyBytes);</span>
+<span class="fc bfc" id="L859" title="All 2 branches covered.">        if (longValue == null) {</span>
+<span class="fc" id="L860">            synchronized (closers) {</span>
+<span class="fc" id="L861">                longValue = metaStoreMap.get(keyBytes);</span>
+<span class="pc bpc" id="L862" title="1 of 2 branches missed.">                if (longValue == null) {</span>
+<span class="fc" id="L863">                    longValue = metaStore.acquireValueFor(key, index);</span>
+<span class="fc" id="L864">                    int length = key.length();</span>
+<span class="fc" id="L865">                    HeapBytesStore&lt;byte[]&gt; key2 = HeapBytesStore.wrap(new byte[length]);</span>
+<span class="fc" id="L866">                    key2.write(0, keyBytes, 0, length);</span>
+<span class="fc" id="L867">                    metaStoreMap.put(key2, longValue);</span>
+<span class="fc" id="L868">                    return null;</span>
+                }
+<span class="nc" id="L870">            }</span>
+        }
+<span class="fc" id="L872">        return longValue;</span>
+    }
+
+    public long tableStoreGet(CharSequence key) {
+<span class="fc" id="L876">        LongValue longValue = tableStoreAcquire(key, Long.MIN_VALUE);</span>
+<span class="pc bpc" id="L877" title="1 of 2 branches missed.">        if (longValue == null) return Long.MIN_VALUE;</span>
+<span class="fc" id="L878">        return longValue.getVolatileValue();</span>
+    }
+
+    private BytesStore asBytes(CharSequence key) {
+<span class="pc bpc" id="L882" title="1 of 2 branches missed.">        return key instanceof BytesStore</span>
+                ? ((BytesStore) key)
+<span class="fc" id="L884">                : ((Bytes&lt;?&gt;) acquireAnotherBytes()).append(key);</span>
+    }
+
+    private static final class CachedCycleTree {
+        private final long directoryModCount;
+        private final NavigableMap&lt;Long, File&gt; cachedCycleTree;
+
+<span class="fc" id="L891">        CachedCycleTree(final long directoryModCount, final NavigableMap&lt;Long, File&gt; cachedCycleTree) {</span>
+<span class="fc" id="L892">            this.directoryModCount = directoryModCount;</span>
+<span class="fc" id="L893">            this.cachedCycleTree = cachedCycleTree;</span>
+<span class="fc" id="L894">        }</span>
+    }
+
+<span class="pc bpc" id="L897" title="1 of 2 branches missed.">    class StoreSupplier extends AbstractCloseable implements WireStoreSupplier {</span>
+<span class="fc" id="L898">        private final AtomicReference&lt;CachedCycleTree&gt; cachedTree = new AtomicReference&lt;&gt;();</span>
+        private final ReferenceCountedCache&lt;File, MappedFile, MappedBytes, IOException&gt; mappedFileCache;
+        private boolean queuePathExists;
+
+<span class="fc" id="L902">        private StoreSupplier() {</span>
+<span class="fc" id="L903">            mappedFileCache = new ReferenceCountedCache&lt;&gt;(</span>
+                    MappedBytes::mappedBytes,
+                    SingleChronicleQueue.this::mappedFile);
+<span class="fc" id="L906">        }</span>
+
+        @SuppressWarnings(&quot;resource&quot;)
+        @Override
+        public SingleChronicleQueueStore acquire(int cycle, boolean createIfAbsent) {
+<span class="fc" id="L911">            throwExceptionIfClosed();</span>
+
+<span class="fc" id="L913">            SingleChronicleQueue that = SingleChronicleQueue.this;</span>
+<span class="fc" id="L914">            @NotNull final RollingResourcesCache.Resource dateValue = that</span>
+<span class="fc" id="L915">                    .dateCache.resourceFor(cycle);</span>
+<span class="fc" id="L916">            MappedBytes mappedBytes = null;</span>
+            try {
+<span class="fc" id="L918">                File path = dateValue.path;</span>
+
+<span class="fc" id="L920">                directoryListing.refresh(false);</span>
+<span class="fc bfc" id="L921" title="All 2 branches covered.">                if (!createIfAbsent &amp;&amp;</span>
+<span class="fc bfc" id="L922" title="All 2 branches covered.">                        (cycle &gt; directoryListing.getMaxCreatedCycle()</span>
+<span class="fc bfc" id="L923" title="All 2 branches covered.">                                || cycle &lt; directoryListing.getMinCreatedCycle()</span>
+<span class="fc bfc" id="L924" title="All 2 branches covered.">                                || !path.exists())) {</span>
+<span class="fc" id="L925">                    return null;</span>
+                }
+
+<span class="fc bfc" id="L928" title="All 2 branches covered.">                if (createIfAbsent)</span>
+<span class="fc" id="L929">                    checkDiskSpace(that.path);</span>
+
+<span class="pc bpc" id="L931" title="1 of 6 branches missed.">                if (createIfAbsent &amp;&amp; !path.exists() &amp;&amp; !dateValue.pathExists)</span>
+<span class="fc" id="L932">                    PrecreatedFiles.renamePreCreatedFileToRequiredFile(path);</span>
+
+<span class="fc" id="L934">                dateValue.pathExists = true;</span>
+
+                try {
+<span class="fc" id="L937">                    mappedBytes = mappedFileCache.get(path);</span>
+<span class="nc" id="L938">                } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L939">                    createFile(path);</span>
+<span class="nc" id="L940">                    mappedBytes = mappedFileCache.get(path);</span>
+<span class="fc" id="L941">                }</span>
+
+//                pauseUnderload();
+
+<span class="pc bpc" id="L945" title="3 of 4 branches missed.">                if (SHOULD_CHECK_CYCLE &amp;&amp; cycle != rollCycle.current(time, epoch)) {</span>
+<span class="nc" id="L946">                    LOG.warn(&quot;&quot;, new Exception(&quot;Creating cycle which is not the current cycle&quot;));</span>
+                }
+<span class="fc" id="L948">                queuePathExists = true;</span>
+<span class="fc" id="L949">                AbstractWire wire = (AbstractWire) wireType.apply(mappedBytes);</span>
+<span class="pc bpc" id="L950" title="2 of 4 branches missed.">                assert wire.startUse();</span>
+<span class="fc" id="L951">                wire.pauser(pauserSupplier.get());</span>
+<span class="fc" id="L952">                wire.headerNumber(rollCycle.toIndex(cycle, 0) - 1);</span>
+
+                SingleChronicleQueueStore wireStore;
+<span class="fc" id="L955">                Bytes&lt;?&gt; bytes = wire.bytes();</span>
+                try {
+<span class="fc bfc" id="L957" title="All 6 branches covered.">                    if (!readOnly &amp;&amp; createIfAbsent &amp;&amp; wire.writeFirstHeader()) {</span>
+                        // implicitly reserves the wireStore for this StoreSupplier
+<span class="fc" id="L959">                        wireStore = storeFactory.apply(that, wire);</span>
+<span class="fc" id="L960">                        wire.updateFirstHeader();</span>
+<span class="pc bpc" id="L961" title="1 of 2 branches missed.">                        if (wireStore.dataVersion() &gt; 0)</span>
+<span class="fc" id="L962">                            wire.usePadding(true);</span>
+
+<span class="fc" id="L964">                        wireStore.initIndex(wire);</span>
+                        // do not allow tailer to see the file until it's header is written
+<span class="fc" id="L966">                        directoryListing.onFileCreated(path, cycle);</span>
+                        // allow directoryListing to pick up the file immediately
+<span class="fc" id="L968">                        firstAndLastCycleTime = 0;</span>
+                    } else {
+                        try {
+<span class="fc" id="L971">                            wire.readFirstHeader(timeoutMS, TimeUnit.MILLISECONDS);</span>
+<span class="fc" id="L972">                        } catch (TimeoutException e) {</span>
+
+<span class="fc" id="L974">                            headerRecovery(that, mappedBytes, wire, bytes, cycle);</span>
+<span class="fc" id="L975">                            return acquire(cycle, createIfAbsent);</span>
+<span class="fc" id="L976">                        }</span>
+
+<span class="fc" id="L978">                        StringBuilder name = acquireStringBuilder();</span>
+<span class="fc" id="L979">                        ValueIn valueIn = wire.readEventName(name);</span>
+<span class="pc bpc" id="L980" title="1 of 2 branches missed.">                        if (StringUtils.isEqual(name, MetaDataKeys.header.name())) {</span>
+                            try {
+<span class="fc" id="L982">                                wireStore = valueIn.typedMarshallable();</span>
+<span class="fc" id="L983">                            } catch (Throwable t) {</span>
+<span class="fc" id="L984">                                mappedBytes.close();</span>
+<span class="fc" id="L985">                                throw t;</span>
+<span class="fc" id="L986">                            }</span>
+
+                        } else {
+<span class="nc" id="L989">                            throw new StreamCorruptedException(&quot;The first message should be the header, was &quot; + name);</span>
+                        }
+                    }
+<span class="nc" id="L992">                } catch (InternalError e) {</span>
+<span class="nc" id="L993">                    long pos = Objects.requireNonNull(bytes.bytesStore()).addressForRead(0);</span>
+<span class="nc" id="L994">                    String s = Long.toHexString(pos);</span>
+<span class="nc" id="L995">                    System.err.println(&quot;pos=&quot; + s);</span>
+<span class="nc" id="L996">                    try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(&quot;/proc/self/maps&quot;)))) {</span>
+<span class="nc bnc" id="L997" title="All 2 branches missed.">                        for (String line; (line = br.readLine()) != null; )</span>
+<span class="nc bnc" id="L998" title="All 2 branches missed.">                            if (line.contains(&quot;.cq4&quot;))</span>
+<span class="nc" id="L999">                                System.err.println(line);</span>
+                    }
+//                        System.err.println(&quot;wire.bytes.refCount=&quot;+wire.bytes().refCount());
+//                        System.err.println(&quot;wire.bytes.byteStore.refCount=&quot;+wire.bytes().bytesStore().refCount());
+<span class="nc" id="L1003">                    throw e;</span>
+<span class="fc" id="L1004">                }</span>
+<span class="fc" id="L1005">                return wireStore;</span>
+
+<span class="fc" id="L1007">            } catch (@NotNull TimeoutException | IOException e) {</span>
+<span class="fc" id="L1008">                Closeable.closeQuietly(mappedBytes);</span>
+<span class="nc" id="L1009">                throw Jvm.rethrow(e);</span>
+            }
+        }
+
+        private synchronized void headerRecovery(final SingleChronicleQueue that, final MappedBytes mappedBytes, final AbstractWire wire, final Bytes&lt;?&gt; bytes, final int cycle) throws IOException, TimeoutException {
+
+            try {
+<span class="fc" id="L1016">                final RandomAccessFile raf = mappedBytes.mappedFile().raf();</span>
+<span class="fc" id="L1017">                final FileLock fileLock = raf.getChannel().tryLock();</span>
+                try {
+
+<span class="fc" id="L1020">                    final int header = bytes.readVolatileInt(0);</span>
+<span class="pc bpc" id="L1021" title="1 of 2 branches missed.">                    if (isReady(header))</span>
+<span class="nc" id="L1022">                        return;</span>
+
+                    // we hold the file lock so are going to force recovery
+<span class="pc bpc" id="L1025" title="1 of 2 branches missed.">                    if (!bytes.compareAndSwapInt(0, header, 0)) {</span>
+<span class="nc" id="L1026">                        LOG.warn(&quot;failed to recover.&quot;);</span>
+<span class="nc" id="L1027">                        throw new StreamCorruptedException(&quot;failed to recover.˚&quot;);</span>
+                    }
+
+<span class="pc bpc" id="L1030" title="1 of 2 branches missed.">                    if (!wire.writeFirstHeader()) {</span>
+<span class="nc" id="L1031">                        LOG.warn(&quot;failed to recover.&quot;);</span>
+<span class="nc" id="L1032">                        throw new StreamCorruptedException(&quot;failed to recover.˚&quot;);</span>
+                    }
+
+<span class="fc" id="L1035">                    try (final SingleChronicleQueueStore wireStore = storeFactory.apply(that, wire)) {</span>
+<span class="fc" id="L1036">                        wire.updateFirstHeader();</span>
+<span class="pc bpc" id="L1037" title="1 of 2 branches missed.">                        if (wireStore.dataVersion() &gt; 0)</span>
+<span class="fc" id="L1038">                            wire.usePadding(true);</span>
+<span class="fc" id="L1039">                        wireStore.initIndex(wire);</span>
+<span class="fc" id="L1040">                        directoryListing.onFileCreated(path, cycle);</span>
+<span class="fc" id="L1041">                        firstAndLastCycleTime = 0;</span>
+                    }
+                } finally {
+<span class="fc" id="L1044">                    fileLock.release();</span>
+                }
+
+<span class="fc" id="L1047">            } catch (NonWritableChannelException e) {</span>
+                // this can occur if the queue is in a read only mode
+<span class="fc" id="L1049">                throw new TimeoutException();</span>
+<span class="fc" id="L1050">            }</span>
+
+<span class="fc" id="L1052">        }</span>
+
+        @Override
+        protected void performClose() {
+<span class="fc" id="L1056">            mappedFileCache.close();</span>
+<span class="fc" id="L1057">        }</span>
+
+        private void createFile(final File path) {
+            try {
+<span class="nc" id="L1061">                File dir = path.getParentFile();</span>
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">                if (!dir.exists())</span>
+<span class="nc" id="L1063">                    dir.mkdirs();</span>
+
+<span class="nc bnc" id="L1065" title="All 2 branches missed.">                if (!path.createNewFile()) {</span>
+<span class="nc" id="L1066">                    Jvm.warn().on(getClass(), &quot;unable to create a file at &quot; + path.getAbsolutePath());</span>
+                }
+<span class="nc" id="L1068">            } catch (IOException ex) {</span>
+<span class="nc" id="L1069">                Jvm.warn().on(getClass(), &quot;unable to create a file at &quot; + path.getAbsolutePath(), ex);</span>
+<span class="nc" id="L1070">            }</span>
+<span class="nc" id="L1071">        }</span>
+
+        private void checkDiskSpace(@NotNull final File filePath) {
+            // This operation can stall for 500 ms or more under load.
+<span class="fc" id="L1075">            DiskSpaceMonitor.INSTANCE.pollDiskSpace(filePath);</span>
+<span class="fc" id="L1076">        }</span>
+
+        /**
+         * @return cycleTree for the current directory / parentFile
+         */
+        @NotNull
+        private NavigableMap&lt;Long, File&gt; cycleTree(final boolean force) {
+
+<span class="fc" id="L1084">            final File parentFile = path;</span>
+
+            // use pre-calculated result in case where queue dir existed when StoreSupplier was constructed
+<span class="pc bpc" id="L1087" title="1 of 4 branches missed.">            if (!queuePathExists &amp;&amp; !parentFile.exists())</span>
+<span class="nc" id="L1088">                throw new IllegalStateException(&quot;parentFile=&quot; + parentFile.getName() + &quot; does not exist&quot;);</span>
+
+<span class="fc" id="L1090">            CachedCycleTree cachedValue = cachedTree.get();</span>
+<span class="fc" id="L1091">            final long directoryModCount = directoryListing.modCount();</span>
+<span class="pc bpc" id="L1092" title="1 of 8 branches missed.">            if (force || (cachedValue == null || directoryModCount == -1 || directoryModCount &gt; cachedValue.directoryModCount)) {</span>
+
+<span class="fc" id="L1094">                final RollingResourcesCache dateCache = SingleChronicleQueue.this.dateCache;</span>
+<span class="fc" id="L1095">                final NavigableMap&lt;Long, File&gt; tree = new TreeMap&lt;&gt;();</span>
+
+<span class="fc" id="L1097">                final File[] files = parentFile.listFiles((File file) -&gt; file.getPath().endsWith(SUFFIX));</span>
+
+<span class="fc bfc" id="L1099" title="All 2 branches covered.">                for (File file : files) {</span>
+<span class="fc" id="L1100">                    tree.put(dateCache.toLong(file), file);</span>
+                }
+
+<span class="fc" id="L1103">                cachedValue = new CachedCycleTree(directoryModCount, tree);</span>
+
+                while (true) {
+<span class="fc" id="L1106">                    final CachedCycleTree existing = cachedTree.get();</span>
+
+<span class="pc bpc" id="L1108" title="1 of 4 branches missed.">                    if (existing != null &amp;&amp; existing.directoryModCount &gt; cachedValue.directoryModCount) {</span>
+<span class="nc" id="L1109">                        break;</span>
+                    }
+
+<span class="pc bpc" id="L1112" title="1 of 2 branches missed.">                    if (cachedTree.compareAndSet(existing, cachedValue)) {</span>
+<span class="fc" id="L1113">                        break;</span>
+                    }
+<span class="nc" id="L1115">                    Jvm.nanoPause();</span>
+<span class="nc" id="L1116">                }</span>
+            }
+
+<span class="fc" id="L1119">            return cachedValue.cachedCycleTree;</span>
+        }
+
+        @Override
+        public int nextCycle(int currentCycle, @NotNull TailerDirection direction) {
+<span class="fc" id="L1124">            throwExceptionIfClosed();</span>
+
+<span class="pc bpc" id="L1126" title="1 of 2 branches missed.">            if (direction == NONE)</span>
+<span class="nc" id="L1127">                throw new AssertionError(&quot;direction is NONE&quot;);</span>
+<span class="pc bpc" id="L1128" title="2 of 4 branches missed.">            assert currentCycle &gt;= 0 : &quot;currentCycle=&quot; + Integer.toHexString(currentCycle);</span>
+<span class="fc" id="L1129">            NavigableMap&lt;Long, File&gt; tree = cycleTree(false);</span>
+<span class="fc" id="L1130">            final File currentCycleFile = dateCache.resourceFor(currentCycle).path;</span>
+
+<span class="fc" id="L1132">            directoryListing.refresh(false);</span>
+<span class="pc bpc" id="L1133" title="1 of 2 branches missed.">            if (currentCycle &gt; directoryListing.getMaxCreatedCycle() ||</span>
+<span class="pc bpc" id="L1134" title="1 of 2 branches missed.">                    currentCycle &lt; directoryListing.getMinCreatedCycle()) {</span>
+<span class="nc" id="L1135">                boolean fileFound = false;</span>
+<span class="nc bnc" id="L1136" title="All 2 branches missed.">                for (int i = 0; i &lt; 20; i++) {</span>
+<span class="nc" id="L1137">                    Jvm.pause(10);</span>
+<span class="nc bnc" id="L1138" title="All 2 branches missed.">                    directoryListing.refresh(i &gt; 1);</span>
+<span class="nc" id="L1139">                    if ((fileFound = (</span>
+<span class="nc bnc" id="L1140" title="All 2 branches missed.">                            currentCycle &lt;= directoryListing.getMaxCreatedCycle() &amp;&amp;</span>
+<span class="nc bnc" id="L1141" title="All 4 branches missed.">                                    currentCycle &gt;= directoryListing.getMinCreatedCycle()))) {</span>
+<span class="nc" id="L1142">                        break;</span>
+                    }
+                }
+<span class="nc" id="L1145">                fileFound |= currentCycleFile.exists();</span>
+
+<span class="nc bnc" id="L1147" title="All 2 branches missed.">                if (!fileFound) {</span>
+<span class="nc" id="L1148">                    directoryListing.refresh(true);</span>
+<span class="nc" id="L1149">                    throw new IllegalStateException(</span>
+<span class="nc" id="L1150">                            String.format(&quot;Expected file to exist for cycle: %d, file: %s.%nminCycle: %d, maxCycle: %d%n&quot; +</span>
+                                            &quot;Available files: %s&quot;,
+<span class="nc" id="L1152">                                    currentCycle, currentCycleFile,</span>
+<span class="nc" id="L1153">                                    directoryListing.getMinCreatedCycle(), directoryListing.getMaxCreatedCycle(),</span>
+<span class="nc" id="L1154">                                    Arrays.toString(path.list((d, n) -&gt; n.endsWith(SingleChronicleQueue.SUFFIX)))));</span>
+                }
+            }
+
+<span class="fc" id="L1158">            Long key = dateCache.toLong(currentCycleFile);</span>
+<span class="fc" id="L1159">            File file = tree.get(key);</span>
+            // already checked that the file should be on-disk, so if it is null, call cycleTree again with force
+<span class="pc bpc" id="L1161" title="1 of 2 branches missed.">            if (file == null) {</span>
+<span class="nc" id="L1162">                tree = cycleTree(true);</span>
+<span class="nc" id="L1163">                file = tree.get(key);</span>
+            }
+<span class="pc bpc" id="L1165" title="1 of 2 branches missed.">            if (file == null) {</span>
+<span class="nc" id="L1166">                throw new AssertionError(&quot;missing currentCycle, file=&quot; + currentCycleFile);</span>
+            }
+
+<span class="pc bpc" id="L1169" title="1 of 3 branches missed.">            switch (direction) {</span>
+                case FORWARD:
+<span class="fc" id="L1171">                    return toCycle(tree.higherEntry(key));</span>
+                case BACKWARD:
+<span class="fc" id="L1173">                    return toCycle(tree.lowerEntry(key));</span>
+                default:
+<span class="nc" id="L1175">                    throw new UnsupportedOperationException(&quot;Unsupported Direction&quot;);</span>
+            }
+        }
+
+        /**
+         * the cycles between a range, inclusive
+         *
+         * @param lowerCycle the lower cycle inclusive
+         * @param upperCycle the upper cycle inclusive
+         * @return the cycles between a range, inclusive
+         */
+        @Override
+        public NavigableSet&lt;Long&gt; cycles(int lowerCycle, int upperCycle) {
+<span class="fc" id="L1188">            throwExceptionIfClosed();</span>
+
+<span class="fc" id="L1190">            final NavigableMap&lt;Long, File&gt; tree = cycleTree(false);</span>
+<span class="fc" id="L1191">            final Long lowerKey = toKey(lowerCycle, &quot;lowerCycle&quot;);</span>
+<span class="fc" id="L1192">            final Long upperKey = toKey(upperCycle, &quot;upperCycle&quot;);</span>
+<span class="pc bpc" id="L1193" title="2 of 4 branches missed.">            assert lowerKey != null;</span>
+<span class="pc bpc" id="L1194" title="2 of 4 branches missed.">            assert upperKey != null;</span>
+<span class="fc" id="L1195">            return tree.subMap(lowerKey, true, upperKey, true).navigableKeySet();</span>
+        }
+
+        private Long toKey(int cyle, String m) {
+<span class="fc" id="L1199">            final File file = dateCache.resourceFor(cyle).path;</span>
+<span class="fc bfc" id="L1200" title="All 2 branches covered.">            if (!file.exists())</span>
+<span class="fc" id="L1201">                throw new IllegalStateException(&quot;'file not found' for the &quot; + m + &quot;, file=&quot; + file);</span>
+<span class="fc" id="L1202">            return dateCache.toLong(file);</span>
+        }
+
+        @Override
+        protected boolean threadSafetyCheck(boolean isUsed) {
+            // StoreSupplier are thread safe
+<span class="fc" id="L1208">            return true;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

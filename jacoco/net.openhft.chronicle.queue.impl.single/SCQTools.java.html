@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SCQTools.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">SCQTools.java</span></div><h1>SCQTools.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.BytesMarshallable;
+import net.openhft.chronicle.bytes.MethodReader;
+import net.openhft.chronicle.wire.DocumentContext;
+import net.openhft.chronicle.wire.MessageHistory;
+import net.openhft.chronicle.wire.ValueIn;
+import net.openhft.chronicle.wire.Wire;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import static net.openhft.chronicle.wire.BinaryWireCode.FIELD_NUMBER;
+
+<span class="fc" id="L15">public enum SCQTools {</span>
+    ;
+
+    static final int MESSAGE_HISTORY_METHOD_ID = -1;
+
+    @Nullable
+    public static MessageHistory readHistory(@NotNull final DocumentContext dc, final MessageHistory history) {
+<span class="fc" id="L22">        final Wire wire = dc.wire();</span>
+
+<span class="pc bpc" id="L24" title="1 of 2 branches missed.">        if (wire == null)</span>
+<span class="nc" id="L25">            return null;</span>
+
+<span class="fc" id="L27">        final Object parent = wire.parent();</span>
+<span class="fc" id="L28">        wire.parent(null);</span>
+        try {
+<span class="fc" id="L30">            final Bytes&lt;?&gt; bytes = wire.bytes();</span>
+
+<span class="fc" id="L32">            final byte code = bytes.readByte(bytes.readPosition());</span>
+<span class="fc" id="L33">            history.reset();</span>
+
+<span class="pc bpc" id="L35" title="1 of 2 branches missed.">            return code == (byte) FIELD_NUMBER ?</span>
+<span class="pc" id="L36">                    readHistoryFromBytes(wire, history) :</span>
+<span class="fc" id="L37">                    readHistoryFromWire(wire, history);</span>
+        } finally {
+<span class="fc" id="L39">            wire.parent(parent);</span>
+        }
+    }
+
+    @Nullable
+    private static MessageHistory readHistoryFromBytes(@NotNull final Wire wire, final MessageHistory history) {
+<span class="nc" id="L45">        final Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="nc bnc" id="L46" title="All 2 branches missed.">        if (MESSAGE_HISTORY_METHOD_ID != wire.readEventNumber())</span>
+<span class="nc" id="L47">            return null;</span>
+<span class="nc" id="L48">        ((BytesMarshallable) history).readMarshallable(bytes);</span>
+<span class="nc" id="L49">        return history;</span>
+    }
+
+    @Nullable
+    private static MessageHistory readHistoryFromWire(@NotNull final Wire wire, final MessageHistory history) {
+<span class="fc" id="L54">        final StringBuilder sb = StoreTailer.SBP.acquireStringBuilder();</span>
+<span class="fc" id="L55">        ValueIn valueIn = wire.read(sb);</span>
+
+<span class="fc bfc" id="L57" title="All 2 branches covered.">        if (!MethodReader.HISTORY.contentEquals(sb))</span>
+<span class="fc" id="L58">            return null;</span>
+<span class="fc" id="L59">        valueIn.object(history, MessageHistory.class);</span>
+<span class="fc" id="L60">        return history;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

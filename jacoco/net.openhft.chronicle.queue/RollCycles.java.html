@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RollCycles.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue</a> &gt; <span class="el_source">RollCycles.java</span></div><h1>RollCycles.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue;
+
+import net.openhft.chronicle.core.Maths;
+import net.openhft.chronicle.core.time.TimeProvider;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.Arrays;
+
+/**
+ * Roll cycles to use with the queue. Sparse indexing roll cycles are useful for improving write performance but they slightly slow random access
+ * performance (with no effect for sequential reads)
+ */
+<span class="fc" id="L30">public enum RollCycles implements RollCycle {</span>
+    /**
+     * 0x40000000 entries per 5 minutes, indexing every 256th entry
+     */
+<span class="fc" id="L34">    FIVE_MINUTELY(/*------*/&quot;yyyyMMdd-HHmm'V'&quot;, 5 * 60 * 1000, 2 &lt;&lt; 10, 256),</span>
+    /**
+     * 0x40000000 entries per 10 minutes, indexing every 256th entry
+     */
+<span class="fc" id="L38">    TEN_MINUTELY(/*------*/&quot;yyyyMMdd-HHmm'X'&quot;, 10 * 60 * 1000, 2 &lt;&lt; 10, 256),</span>
+    /**
+     * 0x40000000 entries per 20 minutes, indexing every 256th entry
+     */
+<span class="fc" id="L42">    TWENTY_MINUTELY(/*------*/&quot;yyyyMMdd-HHmm'XX'&quot;, 20 * 60 * 1000, 2 &lt;&lt; 10, 256),</span>
+    /**
+     * 0x40000000 entries per half hour, indexing every 256th entry
+     */
+<span class="fc" id="L46">    HALF_HOURLY(/*------*/&quot;yyyyMMdd-HHmm'H'&quot;, 30 * 60 * 1000, 2 &lt;&lt; 10, 256),</span>
+    /**
+     * 0xffffffff entries per hour, indexing every 256th entry, leave as 4K and 256 for historical reasons.
+     */
+<span class="fc" id="L50">    FAST_HOURLY(/*----------*/&quot;yyyyMMdd-HH'F'&quot;, 60 * 60 * 1000, 4 &lt;&lt; 10, 256),</span>
+    /**
+     * 0xffffffff entries per 2 hours, indexing every 256th entry
+     */
+<span class="fc" id="L54">    TWO_HOURLY(/*----*/&quot;yyyyMMdd-HH'II'&quot;, 2 * 60 * 60 * 1000, 4 &lt;&lt; 10, 256),</span>
+    /**
+     * 0xffffffff entries per four hours, indexing every 256th entry
+     */
+<span class="fc" id="L58">    FOUR_HOURLY(/*----*/&quot;yyyyMMdd-HH'IV'&quot;, 4 * 60 * 60 * 1000, 4 &lt;&lt; 10, 256),</span>
+    /**
+     * 0xffffffff entries per six hours, indexing every 256th entry
+     */
+<span class="fc" id="L62">    SIX_HOURLY(/*----*/&quot;yyyyMMdd-HH'VI'&quot;, 6 * 60 * 60 * 1000, 4 &lt;&lt; 10, 256),</span>
+    /**
+     * 0xffffffff entries per day, indexing every 256th entry, leave as 4K and 256 for historical reasons.
+     */
+<span class="fc" id="L66">    FAST_DAILY(/*-----------*/&quot;yyyyMMdd'F'&quot;, 24 * 60 * 60 * 1000, 4 &lt;&lt; 10, 256),</span>
+
+    // these are kept for historical reasons
+    /**
+     * 0x4000000 entries per minute, indexing every 16th entry
+     */
+<span class="fc" id="L72">    MINUTELY(/*--------*/&quot;yyyyMMdd-HHmm&quot;, 60 * 1000, 2 &lt;&lt; 10, 16),</span>
+    /**
+     * 0x10000000 entries per hour, indexing every 16th entry, leave as 4K and 16 for historical reasons.
+     */
+<span class="fc" id="L76">    HOURLY(/*----------*/&quot;yyyyMMdd-HH&quot;, 60 * 60 * 1000, 4 &lt;&lt; 10, 16),</span>
+    /**
+     * 0xffffffff entries per day, indexing every 64th entry, leave as 8K and 64 for historical reasons.
+     */
+<span class="fc" id="L80">    DAILY(/*-----------*/&quot;yyyyMMdd&quot;, 24 * 60 * 60 * 1000, 8 &lt;&lt; 10, 64),</span>
+
+    // these are used to minimise rolls but do create very large files, possibly too large.
+    /**
+     * 0xffffffff entries per hour, indexing every 64th entry
+     */
+<span class="fc" id="L86">    LARGE_HOURLY(/*----*/&quot;yyyyMMdd-HH'L'&quot;, 60 * 60 * 1000, 8 &lt;&lt; 10, 64),</span>
+    /**
+     * 0x1fffffffff entries per day, indexing every 128th entry
+     */
+<span class="fc" id="L90">    LARGE_DAILY(/*-----*/&quot;yyyyMMdd'L'&quot;, 24 * 60 * 60 * 1000, 32 &lt;&lt; 10, 128),</span>
+    /**
+     * 0x3ffffffffff entries per day, indexing every 256th entry
+     */
+<span class="fc" id="L94">    XLARGE_DAILY(/*----*/&quot;yyyyMMdd'X'&quot;, 24 * 60 * 60 * 1000, 128 &lt;&lt; 10, 256),</span>
+    /**
+     * 0xffffffffffff entries per day with sparse indexing (every 1024th entry)
+     */
+<span class="fc" id="L98">    HUGE_DAILY(/*------*/&quot;yyyyMMdd'H'&quot;, 24 * 60 * 60 * 1000, 512 &lt;&lt; 10, 1024),</span>
+
+    // these are largely used for testing and benchmarks to almost turn off indexing.
+    /**
+     * 0x20000000 entries per day, indexing every 8th entry
+     */
+<span class="fc" id="L104">    SMALL_DAILY(/*-----*/&quot;yyyyMMdd'S'&quot;, 24 * 60 * 60 * 1000, 8 &lt;&lt; 10, 8),</span>
+    /**
+     * 0x3ffffffff entries per hour with sparse indexing (every 1024th entry)
+     */
+<span class="fc" id="L108">    LARGE_HOURLY_SPARSE(&quot;yyyyMMdd-HH'LS'&quot;, 60 * 60 * 1000, 4 &lt;&lt; 10, 1024),</span>
+    /**
+     * 0x3ffffffffff entries per hour with super-sparse indexing (every (2^20)th entry)
+     */
+<span class="fc" id="L112">    LARGE_HOURLY_XSPARSE(&quot;yyyyMMdd-HH'LX'&quot;, 60 * 60 * 1000, 2 &lt;&lt; 10, 1 &lt;&lt; 20),</span>
+    /**
+     * 0xffffffffffff entries per day with super-sparse indexing (every (2^20)th entry)
+     */
+<span class="fc" id="L116">    HUGE_DAILY_XSPARSE(&quot;yyyyMMdd'HX'&quot;, 24 * 60 * 60 * 1000, 16 &lt;&lt; 10, 1 &lt;&lt; 20),</span>
+
+    // these are used for test to reduce the size of a queue dump when doing a small test.
+    /**
+     * 0xffffffff entries - Only good for testing
+     */
+<span class="fc" id="L122">    TEST_SECONDLY(/*---*/&quot;yyyyMMdd-HHmmss'T'&quot;, 1000, 1 &lt;&lt; 15, 4),</span>
+    /**
+     * 0x1000 entries - Only good for testing
+     */
+<span class="fc" id="L126">    TEST4_SECONDLY(/*---*/&quot;yyyyMMdd-HHmmss'T4'&quot;, 1000, 32, 4),</span>
+    /**
+     * 0x400 entries per hour - Only good for testing
+     */
+<span class="fc" id="L130">    TEST_HOURLY(/*-----*/&quot;yyyyMMdd-HH'T'&quot;, 60 * 60 * 1000, 16, 4),</span>
+    /**
+     * 0x40 entries per day - Only good for testing
+     */
+<span class="fc" id="L134">    TEST_DAILY(/*------*/&quot;yyyyMMdd'T1'&quot;, 24 * 60 * 60 * 1000, 8, 1),</span>
+    /**
+     * 0x200 entries per day - Only good for testing
+     */
+<span class="fc" id="L138">    TEST2_DAILY(/*-----*/&quot;yyyyMMdd'T2'&quot;, 24 * 60 * 60 * 1000, 16, 2),</span>
+    /**
+     * 0x1000 entries per day - Only good for testing
+     */
+<span class="fc" id="L142">    TEST4_DAILY(/*-----*/&quot;yyyyMMdd'T4'&quot;, 24 * 60 * 60 * 1000, 32, 4),</span>
+    /**
+     * 0x20000 entries per day - Only good for testing
+     */
+<span class="fc" id="L146">    TEST8_DAILY(/*-----*/&quot;yyyyMMdd'T8'&quot;, 24 * 60 * 60 * 1000, 128, 8),</span>
+    ;
+<span class="fc" id="L148">    public static final RollCycles DEFAULT = FAST_DAILY;</span>
+
+    // don't alter this or you will confuse yourself.
+<span class="fc" id="L151">    private static final Iterable&lt;RollCycles&gt; VALUES = Arrays.asList(values());</span>
+
+    private final String format;
+    private final int lengthInMillis;
+    private final int cycleShift;
+    private final int indexCount;
+    private final int indexSpacing;
+    private final long sequenceMask;
+
+/*    RollCycles(String format, int lengthInMillis, int indexCount, int indexSpacing) {
+        this.format = format;
+        this.lengthInMillis = lengthInMillis;
+        this.indexCount = Maths.nextPower2(indexCount, 8);
+        this.indexSpacing = Maths.nextPower2(indexSpacing, 1);
+        cycleShift = Math.max(32, Maths.intLog2(indexCount) * 2 + Maths.intLog2(indexSpacing));
+        sequenceMask = (1L &lt;&lt; cycleShift) - 1;
+
+    }*/
+
+<span class="fc" id="L170">    RollCycles(String format, int lengthInMillis, int indexCount, int indexSpacing) {</span>
+<span class="fc" id="L171">        this.format = format;</span>
+<span class="fc" id="L172">        this.lengthInMillis = lengthInMillis;</span>
+<span class="fc" id="L173">        this.indexCount = Maths.nextPower2(indexCount, 8);</span>
+<span class="fc" id="L174">        this.indexSpacing = Maths.nextPower2(indexSpacing, 1);</span>
+<span class="fc" id="L175">        cycleShift = Math.max(32, Maths.intLog2(indexCount) * 2 + Maths.intLog2(indexSpacing));</span>
+<span class="fc" id="L176">        sequenceMask = (1L &lt;&lt; cycleShift) - 1;</span>
+<span class="fc" id="L177">    }</span>
+ 
+
+    public long maxMessagesPerCycle() {
+<span class="nc" id="L181">        return maxMessagesPerCycle(indexCount, indexSpacing);</span>
+    }
+
+    public static Iterable&lt;RollCycles&gt; all() {
+<span class="fc" id="L185">        return VALUES;</span>
+    }
+
+    @Override
+    public String format() {
+<span class="fc" id="L190">        return this.format;</span>
+    }
+
+    @Override
+    public int lengthInMillis() {
+<span class="fc" id="L195">        return this.lengthInMillis;</span>
+    }
+
+    /**
+     * @return this is the size of each index array, note: indexCount^2 is the maximum number of index queue entries.
+     */
+    @Override
+    public int defaultIndexCount() {
+<span class="fc" id="L203">        return indexCount;</span>
+    }
+
+    @Override
+    public int defaultIndexSpacing() {
+<span class="fc" id="L208">        return indexSpacing;</span>
+    }
+
+    @Override
+    public int current(@NotNull TimeProvider time, long epoch) {
+<span class="fc" id="L213">        return (int) ((time.currentTimeMillis() - epoch) / lengthInMillis());</span>
+    }
+
+    @Override
+    public long toIndex(int cycle, long sequenceNumber) {
+<span class="fc" id="L218">        return ((long) cycle &lt;&lt; cycleShift) + (sequenceNumber &amp; sequenceMask);</span>
+    }
+
+    @Override
+    public long toSequenceNumber(long index) {
+<span class="fc" id="L223">        return index &amp; sequenceMask;</span>
+    }
+
+    @Override
+    public int toCycle(long index) {
+<span class="fc" id="L228">        return Maths.toUInt31(index &gt;&gt; cycleShift);</span>
+    }
+
+    public static long maxMessagesPerCycle(final long indexCount0, final int indexSpacing0) {
+
+        // these are inline with the SQ Indexing code
+<span class="nc" id="L234">        long indexCount = Maths.nextPower2(indexCount0, 8);</span>
+
+        // these are inline with the SQ Indexing code
+<span class="nc" id="L237">        int indexSpacing = Maths.nextPower2(indexSpacing0, 1);</span>
+
+<span class="nc" id="L239">        int cycleShift = Math.max(32, Maths.intLog2(indexCount) * 2 + Maths.intLog2(indexSpacing));</span>
+<span class="nc" id="L240">        long sequenceMask0 = (1L &lt;&lt; cycleShift) - 1L;</span>
+
+<span class="nc" id="L242">        return Math.min(sequenceMask0, indexCount * indexCount * indexSpacing);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

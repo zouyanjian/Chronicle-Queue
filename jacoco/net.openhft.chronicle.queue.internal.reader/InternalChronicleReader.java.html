@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InternalChronicleReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.internal.reader</a> &gt; <span class="el_source">InternalChronicleReader.java</span></div><h1>InternalChronicleReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2014 Higher Frequency Trading
+ *
+ * http://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.openhft.chronicle.queue.internal.reader;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.MethodReader;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.queue.reader.*;
+import net.openhft.chronicle.queue.util.ToolsUtil;
+import net.openhft.chronicle.threads.Pauser;
+import net.openhft.chronicle.wire.DocumentContext;
+import net.openhft.chronicle.wire.WireType;
+import org.jetbrains.annotations.NotNull;
+
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
+
+import static net.openhft.chronicle.core.util.ObjectUtils.requireNonNull;
+import static net.openhft.chronicle.queue.impl.StoreFileListener.NO_OP;
+
+<span class="fc" id="L49">public final class InternalChronicleReader implements Reader{</span>
+    private static final long UNSET_VALUE = Long.MIN_VALUE;
+
+<span class="fc" id="L52">    private final List&lt;Pattern&gt; inclusionRegex = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L53">    private final List&lt;Pattern&gt; exclusionRegex = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L54">    private final Pauser pauser = Pauser.millis(1, 100);</span>
+    private Path basePath;
+<span class="fc" id="L56">    private long startIndex = UNSET_VALUE;</span>
+<span class="fc" id="L57">    private boolean tailInputSource = false;</span>
+<span class="fc" id="L58">    private long maxHistoryRecords = UNSET_VALUE;</span>
+<span class="fc" id="L59">    private boolean readOnly = true;</span>
+    private ChronicleReaderPlugin customPlugin;
+    private Consumer&lt;? super String&gt; messageSink;
+<span class="fc" id="L62">    private Function&lt;ExcerptTailer, DocumentContext&gt; pollMethod = ExcerptTailer::readingDocument;</span>
+<span class="fc" id="L63">    private WireType wireType = WireType.TEXT;</span>
+<span class="fc" id="L64">    private Supplier&lt;QueueEntryHandler&gt; entryHandlerFactory = () -&gt; new MessageToTextQueueEntryHandler(wireType);</span>
+<span class="fc" id="L65">    private boolean displayIndex = true;</span>
+    private Class&lt;?&gt; methodReaderInterface;
+<span class="fc" id="L67">    private volatile boolean running = true;</span>
+
+    static {
+<span class="fc" id="L70">        ToolsUtil.warnIfResourceTracing();</span>
+<span class="fc" id="L71">    }</span>
+
+
+    private ThreadLocal&lt;ExcerptTailer&gt; tlTailer;
+
+    public void execute() {
+        long lastObservedTailIndex;
+<span class="fc" id="L78">        long highestReachedIndex = 0L;</span>
+<span class="fc" id="L79">        boolean isFirstIteration = true;</span>
+        boolean retryLastOperation;
+        boolean queueHasBeenModified;
+        do {
+<span class="fc" id="L83">            try (final ChronicleQueue queue = createQueue();</span>
+<span class="fc" id="L84">                 final QueueEntryHandler messageConverter = entryHandlerFactory.get()) {</span>
+<span class="fc" id="L85">                final ExcerptTailer tailer = queue.createTailer();</span>
+
+<span class="fc" id="L87">                tlTailer = ThreadLocal.withInitial(queue::createTailer);</span>
+
+                do {
+<span class="fc bfc" id="L90" title="All 2 branches covered.">                    if (highestReachedIndex != 0L) {</span>
+<span class="fc" id="L91">                        tailer.moveToIndex(highestReachedIndex);</span>
+                    }
+<span class="fc" id="L93">                    final Bytes textConversionTarget = Bytes.elasticByteBuffer();</span>
+                    try {
+<span class="fc" id="L95">                        moveToSpecifiedPosition(queue, tailer, isFirstIteration);</span>
+<span class="fc" id="L96">                        lastObservedTailIndex = tailer.index();</span>
+<span class="fc" id="L97">                        Consumer&lt;String&gt; messageConsumer = text -&gt; applyFiltersAndLog(text, tailer.index());</span>
+                        BooleanSupplier readOne;
+<span class="fc bfc" id="L99" title="All 2 branches covered.">                        if (methodReaderInterface == null) {</span>
+<span class="fc" id="L100">                            readOne = () -&gt; readOne(messageConverter, tailer, messageConsumer);</span>
+                        } else {
+<span class="fc" id="L102">                            Bytes&lt;ByteBuffer&gt; bytes = Bytes.elasticHeapByteBuffer(256);</span>
+<span class="fc" id="L103">                            Object writer = WireType.TEXT.apply(bytes).methodWriter(methodReaderInterface);</span>
+<span class="fc" id="L104">                            MethodReader methodReader = tailer.methodReader(writer);</span>
+<span class="fc" id="L105">                            readOne = () -&gt; {</span>
+<span class="fc" id="L106">                                boolean found = methodReader.readOne();</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">                                if (found)</span>
+<span class="fc" id="L108">                                    messageConsumer.accept(bytes.toString());</span>
+<span class="fc" id="L109">                                bytes.clear();</span>
+<span class="fc" id="L110">                                return found;</span>
+                            };
+                        }
+
+<span class="pc bpc" id="L114" title="1 of 2 branches missed.">                        while (!Thread.currentThread().isInterrupted()) {</span>
+<span class="fc" id="L115">                            boolean found = readOne.getAsBoolean();</span>
+
+<span class="fc bfc" id="L117" title="All 2 branches covered.">                            if (!found) {</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">                                if (tailInputSource) {</span>
+<span class="fc" id="L119">                                    pauser.pause();</span>
+                                }
+                                break;
+                            }
+<span class="fc" id="L123">                            pauser.reset();</span>
+<span class="fc" id="L124">                        }</span>
+                    } finally {
+<span class="fc" id="L126">                        textConversionTarget.releaseLast();</span>
+<span class="fc" id="L127">                        highestReachedIndex = tailer.index();</span>
+<span class="fc" id="L128">                        isFirstIteration = false;</span>
+                    }
+<span class="fc" id="L130">                    queueHasBeenModified = queueHasBeenModifiedSinceLastCheck(lastObservedTailIndex, queue);</span>
+<span class="fc" id="L131">                    retryLastOperation = false;</span>
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">                    if (!running)</span>
+<span class="nc" id="L133">                        return;</span>
+<span class="fc bfc" id="L134" title="All 4 branches covered.">                } while (tailInputSource || queueHasBeenModified);</span>
+<span class="fc" id="L135">            } catch (final RuntimeException e) {</span>
+<span class="pc bpc" id="L136" title="3 of 4 branches missed.">                if (e.getCause() != null &amp;&amp; e.getCause() instanceof DateTimeParseException) {</span>
+                    // ignore this error - due to a race condition between
+                    // the reader creating a Queue (with default roll-cycle due to no files on disk)
+                    // and the writer appending to the Queue with a non-default roll-cycle
+<span class="nc" id="L140">                    retryLastOperation = true;</span>
+                } else {
+<span class="fc" id="L142">                    throw e;</span>
+                }
+<span class="fc" id="L144">            }</span>
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">        } while (retryLastOperation);</span>
+
+<span class="fc" id="L147">    }</span>
+
+    public boolean readOne(@NotNull QueueEntryHandler messageConverter, @NotNull ExcerptTailer tailer, @NotNull Consumer&lt;String&gt; messageConsumer) {
+<span class="fc" id="L150">        requireNonNull(messageConsumer);</span>
+<span class="fc" id="L151">        requireNonNull(tailer);</span>
+<span class="fc" id="L152">        requireNonNull(messageConsumer);</span>
+<span class="fc" id="L153">        try (DocumentContext dc = pollMethod.apply(tailer)) {</span>
+<span class="fc bfc" id="L154" title="All 2 branches covered.">            if (!dc.isPresent()) {</span>
+<span class="fc" id="L155">                return false;</span>
+            }
+
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">            if (customPlugin == null) {</span>
+<span class="fc" id="L159">                messageConverter.accept(dc.wire(), messageConsumer);</span>
+            } else {
+<span class="nc" id="L161">                customPlugin.onReadDocument(dc, messageConsumer);</span>
+            }
+        }
+<span class="fc" id="L164">        return true;</span>
+    }
+
+    InternalChronicleReader withReadOnly(boolean readOnly) {
+<span class="fc" id="L168">        this.readOnly = readOnly;</span>
+<span class="fc" id="L169">        return this;</span>
+    }
+
+    public InternalChronicleReader withMessageSink(@NotNull Consumer&lt;? super String&gt; messageSink) {
+<span class="fc" id="L173">        this.messageSink = requireNonNull(messageSink);</span>
+<span class="fc" id="L174">        return this;</span>
+    }
+
+    public Consumer&lt;? super String&gt; messageSink() {
+<span class="nc" id="L178">        return messageSink;</span>
+    }
+
+    public InternalChronicleReader withBasePath(final @NotNull Path path) {
+<span class="fc" id="L182">        this.basePath = requireNonNull(path);</span>
+<span class="fc" id="L183">        return this;</span>
+    }
+
+    public InternalChronicleReader withInclusionRegex(final @NotNull String regex) {
+<span class="fc" id="L187">        this.inclusionRegex.add(Pattern.compile(requireNonNull(regex)));</span>
+<span class="fc" id="L188">        return this;</span>
+    }
+
+    public InternalChronicleReader withExclusionRegex(final @NotNull String regex) {
+<span class="fc" id="L192">        this.exclusionRegex.add(Pattern.compile(requireNonNull(regex)));</span>
+<span class="fc" id="L193">        return this;</span>
+    }
+
+    public InternalChronicleReader withCustomPlugin(final @NotNull ChronicleReaderPlugin customPlugin) {
+<span class="nc" id="L197">        this.customPlugin = requireNonNull(customPlugin);</span>
+<span class="nc" id="L198">        return this;</span>
+    }
+
+    public InternalChronicleReader withStartIndex(final long index) {
+<span class="fc" id="L202">        this.startIndex = index;</span>
+<span class="fc" id="L203">        return this;</span>
+    }
+
+    public InternalChronicleReader tail() {
+<span class="fc" id="L207">        this.tailInputSource = true;</span>
+<span class="fc" id="L208">        return this;</span>
+    }
+
+    public InternalChronicleReader historyRecords(final long maxHistoryRecords) {
+<span class="fc" id="L212">        this.maxHistoryRecords = maxHistoryRecords;</span>
+<span class="fc" id="L213">        return this;</span>
+    }
+
+    public InternalChronicleReader asMethodReader(String methodReaderInterface) {
+<span class="fc bfc" id="L217" title="All 2 branches covered.">        if (methodReaderInterface == null)</span>
+<span class="fc" id="L218">            entryHandlerFactory = () -&gt; new DummyMethodReaderQueueEntryHandler(wireType);</span>
+        else try {
+<span class="fc" id="L220">            this.methodReaderInterface = Class.forName(methodReaderInterface);</span>
+<span class="nc" id="L221">        } catch (ClassNotFoundException e) {</span>
+<span class="nc" id="L222">            throw Jvm.rethrow(e);</span>
+<span class="fc" id="L223">        }</span>
+<span class="fc" id="L224">        return this;</span>
+    }
+
+    public InternalChronicleReader withWireType(@NotNull WireType wireType) {
+<span class="nc" id="L228">        this.wireType = requireNonNull(wireType);</span>
+<span class="nc" id="L229">        return this;</span>
+    }
+
+    public InternalChronicleReader suppressDisplayIndex() {
+<span class="nc" id="L233">        this.displayIndex = false;</span>
+<span class="nc" id="L234">        return this;</span>
+    }
+
+    public void stop() {
+<span class="nc" id="L238">        running = false;</span>
+<span class="nc" id="L239">    }</span>
+
+    // visible for testing only
+    InternalChronicleReader withDocumentPollMethod(final Function&lt;ExcerptTailer, DocumentContext&gt; pollMethod) {
+<span class="fc" id="L243">        this.pollMethod = requireNonNull(pollMethod);</span>
+<span class="fc" id="L244">        return this;</span>
+    }
+
+    private boolean queueHasBeenModifiedSinceLastCheck(final long lastObservedTailIndex, ChronicleQueue queue) {
+<span class="fc" id="L248">        long currentTailIndex = indexOfEnd(queue);</span>
+<span class="fc bfc" id="L249" title="All 2 branches covered.">        return currentTailIndex &gt; lastObservedTailIndex;</span>
+    }
+
+    private void moveToSpecifiedPosition(final ChronicleQueue ic, final ExcerptTailer tailer, final boolean isFirstIteration) {
+<span class="fc bfc" id="L253" title="All 4 branches covered.">        if (isSet(startIndex) &amp;&amp; isFirstIteration) {</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">            if (startIndex &lt; ic.firstIndex()) {</span>
+<span class="fc" id="L255">                throw new IllegalArgumentException(String.format(&quot;startIndex %d is less than first index %d&quot;,</span>
+<span class="fc" id="L256">                        startIndex, ic.firstIndex()));</span>
+            }
+
+<span class="fc" id="L259">            messageSink.accept(&quot;Waiting for startIndex &quot; + startIndex);</span>
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">            while (!tailer.moveToIndex(startIndex)) {</span>
+<span class="nc" id="L261">                Jvm.pause(100);</span>
+            }
+        }
+
+<span class="fc bfc" id="L265" title="All 4 branches covered.">        if (isSet(maxHistoryRecords) &amp;&amp; isFirstIteration) {</span>
+<span class="fc" id="L266">            tailer.toEnd();</span>
+<span class="fc" id="L267">            tailer.moveToIndex(Math.max(ic.firstIndex(), tailer.index() - maxHistoryRecords));</span>
+<span class="fc bfc" id="L268" title="All 4 branches covered.">        } else if (tailInputSource &amp;&amp; isFirstIteration) {</span>
+<span class="fc" id="L269">            tailer.toEnd();</span>
+        }
+<span class="fc" id="L271">    }</span>
+
+    private static boolean checkForMatches(final List&lt;Pattern&gt; patterns, final String text,
+                                           final boolean shouldBePresent) {
+<span class="fc bfc" id="L275" title="All 2 branches covered.">        for (Pattern pattern : patterns) {</span>
+<span class="fc bfc" id="L276" title="All 4 branches covered.">            if (!shouldBePresent == pattern.matcher(text).find()) {</span>
+<span class="fc" id="L277">                return false;</span>
+            }
+<span class="fc" id="L279">        }</span>
+<span class="fc" id="L280">        return true;</span>
+    }
+
+    private static boolean isSet(final long configValue) {
+<span class="fc bfc" id="L284" title="All 2 branches covered.">        return configValue != UNSET_VALUE;</span>
+    }
+
+
+    private long indexOfEnd(ChronicleQueue queue) {
+<span class="fc" id="L289">        final ExcerptTailer excerptTailer = tlTailer.get();</span>
+<span class="fc" id="L290">        long index = excerptTailer.index();</span>
+        try {
+<span class="fc" id="L292">            return excerptTailer.toEnd().index();</span>
+        } finally {
+<span class="fc" id="L294">            excerptTailer.moveToIndex(index);</span>
+        }
+
+    }
+
+    @NotNull
+    private ChronicleQueue createQueue() {
+<span class="fc bfc" id="L301" title="All 2 branches covered.">        if (!Files.exists(basePath)) {</span>
+<span class="fc" id="L302">            throw new IllegalArgumentException(String.format(&quot;Path '%s' does not exist (absolute path '%s')&quot;, basePath, basePath.toAbsolutePath()));</span>
+        }
+<span class="fc" id="L304">        return SingleChronicleQueueBuilder</span>
+<span class="fc" id="L305">                .binary(basePath.toFile())</span>
+<span class="fc" id="L306">                .readOnly(readOnly)</span>
+<span class="fc" id="L307">                .storeFileListener(NO_OP)</span>
+<span class="fc" id="L308">                .build();</span>
+    }
+
+    protected void applyFiltersAndLog(final String text, final long index) {
+<span class="fc bfc" id="L312" title="All 4 branches covered.">        if (inclusionRegex.isEmpty() || checkForMatches(inclusionRegex, text, true)) {</span>
+<span class="fc bfc" id="L313" title="All 4 branches covered.">            if (exclusionRegex.isEmpty() || checkForMatches(exclusionRegex, text, false)) {</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">                if (displayIndex)</span>
+<span class="fc" id="L315">                    messageSink.accept(&quot;0x&quot; + Long.toHexString(index) + &quot;: &quot;);</span>
+<span class="fc" id="L316">                messageSink.accept(text);</span>
+            }
+        }
+<span class="fc" id="L319">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

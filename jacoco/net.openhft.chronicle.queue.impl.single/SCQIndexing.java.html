@@ -1,0 +1,753 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SCQIndexing.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">SCQIndexing.java</span></div><h1>SCQIndexing.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 https://chronicle.software
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *  you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.bytes.Byteable;
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.Maths;
+import net.openhft.chronicle.core.StackTrace;
+import net.openhft.chronicle.core.annotation.UsedViaReflection;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.threads.CleaningThreadLocal;
+import net.openhft.chronicle.core.threads.ThreadLocalHelper;
+import net.openhft.chronicle.core.values.LongArrayValues;
+import net.openhft.chronicle.core.values.LongValue;
+import net.openhft.chronicle.queue.impl.ExcerptContext;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.io.EOFException;
+import java.io.StreamCorruptedException;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.function.Supplier;
+
+import static net.openhft.chronicle.core.io.Closeable.closeQuietly;
+import static net.openhft.chronicle.wire.Wires.NOT_INITIALIZED;
+
+<span class="pc bpc" id="L47" title="1 of 2 branches missed.">class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMarshallable, Closeable {</span>
+<span class="fc" id="L48">    private static final boolean IGNORE_INDEXING_FAILURE = Jvm.getBoolean(&quot;queue.ignoreIndexingFailure&quot;);</span>
+<span class="fc" id="L49">    private static final boolean REPORT_LINEAR_SCAN = Jvm.getBoolean(&quot;chronicle.queue.report.linear.scan.latency&quot;);</span>
+
+    final LongValue nextEntryToBeIndexed;
+    private final int indexCount, indexCountBits;
+    private final int indexSpacing, indexSpacingBits;
+    private final LongValue index2Index;
+    private final Supplier&lt;LongArrayValues&gt; longArraySupplier;
+    @NotNull
+    private final ThreadLocal&lt;WeakReference&lt;LongArrayValuesHolder&gt;&gt; index2indexArray;
+    @NotNull
+    private final ThreadLocal&lt;WeakReference&lt;LongArrayValuesHolder&gt;&gt; indexArray;
+    @NotNull
+    private final WriteMarshallable index2IndexTemplate;
+    @NotNull
+    private final WriteMarshallable indexTemplate;
+    LongValue writePosition;
+    Sequence sequence;
+    // visible for testing
+    int linearScanCount;
+<span class="fc" id="L68">    Collection&lt;Closeable&gt; closeables = new ArrayList&lt;&gt;();</span>
+
+    /**
+     * used by {@link Demarshallable}
+     *
+     * @param wire a wire
+     */
+    @UsedViaReflection
+    private SCQIndexing(@NotNull WireIn wire) {
+<span class="fc" id="L77">        this(wire.read(IndexingFields.indexCount).int32(),</span>
+<span class="fc" id="L78">                wire.read(IndexingFields.indexSpacing).int32(),</span>
+<span class="fc" id="L79">                wire.read(IndexingFields.index2Index).int64ForBinding(null),</span>
+<span class="fc" id="L80">                wire.read(IndexingFields.lastIndex).int64ForBinding(null),</span>
+                wire::newLongArrayReference);
+<span class="fc" id="L82">    }</span>
+
+    SCQIndexing(@NotNull WireType wireType, int indexCount, int indexSpacing) {
+<span class="fc" id="L85">        this(indexCount,</span>
+                indexSpacing,
+<span class="fc" id="L87">                wireType.newLongReference().get(),</span>
+<span class="fc" id="L88">                wireType.newLongReference().get(),</span>
+<span class="fc" id="L89">                wireType.newLongArrayReference());</span>
+<span class="fc" id="L90">    }</span>
+
+<span class="fc" id="L92">    private SCQIndexing(int indexCount, int indexSpacing, LongValue index2Index, LongValue nextEntryToBeIndexed, Supplier&lt;LongArrayValues&gt; longArraySupplier) {</span>
+<span class="fc" id="L93">        this.indexCount = indexCount;</span>
+<span class="fc" id="L94">        this.indexCountBits = Maths.intLog2(indexCount);</span>
+<span class="fc" id="L95">        this.indexSpacing = indexSpacing;</span>
+<span class="fc" id="L96">        this.indexSpacingBits = Maths.intLog2(indexSpacing);</span>
+<span class="fc" id="L97">        this.index2Index = index2Index;</span>
+<span class="fc" id="L98">        this.nextEntryToBeIndexed = nextEntryToBeIndexed;</span>
+<span class="fc" id="L99">        this.longArraySupplier = longArraySupplier;</span>
+<span class="fc" id="L100">        this.index2indexArray = CleaningThreadLocal.withCleanup(wr -&gt; Closeable.closeQuietly(wr.get()));</span>
+<span class="fc" id="L101">        this.indexArray = CleaningThreadLocal.withCleanup(wr -&gt; Closeable.closeQuietly(wr.get()));</span>
+<span class="fc" id="L102">        this.index2IndexTemplate = w -&gt; w.writeEventName(&quot;index2index&quot;).int64array(indexCount);</span>
+<span class="fc" id="L103">        this.indexTemplate = w -&gt; w.writeEventName(&quot;index&quot;).int64array(indexCount);</span>
+<span class="fc" id="L104">    }</span>
+
+    private LongArrayValuesHolder newLogArrayValuesHolder(Supplier&lt;LongArrayValues&gt; las) {
+<span class="fc" id="L107">        LongArrayValuesHolder longArrayValuesHolder = new LongArrayValuesHolder(las.get());</span>
+<span class="fc" id="L108">        closeables.add(longArrayValuesHolder);</span>
+<span class="fc" id="L109">        return longArrayValuesHolder;</span>
+    }
+
+    @NotNull
+    private LongArrayValuesHolder getIndex2IndexArray() {
+<span class="fc" id="L114">        return ThreadLocalHelper.getTL(index2indexArray, longArraySupplier, this::newLogArrayValuesHolder);</span>
+    }
+
+    @NotNull
+    private LongArrayValuesHolder getIndexArray() {
+<span class="fc" id="L119">        return ThreadLocalHelper.getTL(indexArray, longArraySupplier, this::newLogArrayValuesHolder);</span>
+    }
+
+    public long toAddress0(long index) {
+<span class="fc" id="L123">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L125">        long siftedIndex = index &gt;&gt; (indexSpacingBits + indexCountBits);</span>
+<span class="fc" id="L126">        long mask = indexCount - 1L;</span>
+        // convert to an offset
+<span class="fc" id="L128">        return mask &amp; siftedIndex;</span>
+    }
+
+    long toAddress1(long index) {
+<span class="fc" id="L132">        long siftedIndex = index &gt;&gt; indexSpacingBits;</span>
+<span class="fc" id="L133">        long mask = indexCount - 1L;</span>
+        // convert to an offset
+<span class="fc" id="L135">        return mask &amp; siftedIndex;</span>
+    }
+
+/*    @Override
+    protected boolean performCloseInBackground() {
+        return true;
+    }*/
+
+    @Override
+    protected void performClose() {
+<span class="fc" id="L145">        closeQuietly(index2Index, nextEntryToBeIndexed);</span>
+<span class="fc" id="L146">        closeQuietly(closeables);</span>
+        // Eagerly clean up the contents of thread locals but only for this thread.
+        // The contents of the thread local for other threads will be cleaned up in
+        // MappedFile.performRelease
+<span class="fc" id="L150">        closeTL(indexArray);</span>
+<span class="fc" id="L151">        closeTL(index2indexArray);</span>
+<span class="fc" id="L152">    }</span>
+
+    private void closeTL(ThreadLocal&lt;WeakReference&lt;LongArrayValuesHolder&gt;&gt; tl) {
+<span class="fc" id="L155">        WeakReference&lt;LongArrayValuesHolder&gt; weakReference = tl.get();</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (weakReference == null)</span>
+<span class="fc" id="L157">            return;</span>
+<span class="fc" id="L158">        LongArrayValuesHolder holder = weakReference.get();</span>
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        if (holder != null)</span>
+<span class="fc" id="L160">            closeQuietly(holder.values);</span>
+<span class="fc" id="L161">    }</span>
+
+    @Override
+    public void writeMarshallable(@NotNull WireOut wire) {
+<span class="fc" id="L165">        wire.write(IndexingFields.indexCount).int64(indexCount)</span>
+<span class="fc" id="L166">                .write(IndexingFields.indexSpacing).int64(indexSpacing)</span>
+<span class="fc" id="L167">                .write(IndexingFields.index2Index).int64forBinding(0L, index2Index)</span>
+<span class="fc" id="L168">                .write(IndexingFields.lastIndex).int64forBinding(0L, nextEntryToBeIndexed);</span>
+<span class="fc" id="L169">    }</span>
+
+    @NotNull
+    private LongArrayValues arrayForAddress(@NotNull Wire wire, long secondaryAddress) {
+<span class="fc" id="L173">        LongArrayValuesHolder holder = getIndexArray();</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">        if (holder.address == secondaryAddress)</span>
+<span class="fc" id="L175">            return holder.values;</span>
+<span class="fc" id="L176">        holder.address = secondaryAddress;</span>
+<span class="fc" id="L177">        wire.bytes().readPositionRemaining(secondaryAddress, 4); // to read the header.</span>
+<span class="fc" id="L178">        wire.readMetaDataHeader();</span>
+<span class="fc" id="L179">        return array(wire, holder.values, false);</span>
+    }
+
+    @NotNull
+    private LongArrayValues array(@NotNull WireIn w, @NotNull LongArrayValues using, boolean index2index) {
+<span class="fc" id="L184">        final StringBuilder sb = Wires.acquireStringBuilder();</span>
+<span class="fc" id="L185">        long readPos = w.bytes().readPosition();</span>
+<span class="fc" id="L186">        @NotNull final ValueIn valueIn = w.readEventName(sb);</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">        String name = index2index ? &quot;index2index&quot; : &quot;index&quot;;</span>
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">        if (!name.contentEquals(sb))</span>
+<span class="nc" id="L189">            throw new IllegalStateException(&quot;expecting index, was &quot; + sb + &quot;, bytes: &quot; + w.bytes().readPosition(readPos).toHexString());</span>
+
+<span class="fc" id="L191">        valueIn.int64array(using, this, (o1, o2) -&gt; {</span>
+<span class="fc" id="L192">        });</span>
+<span class="fc" id="L193">        return using;</span>
+    }
+
+    /**
+     * Creates a new Excerpt containing and index which will be 1L &lt;&lt; 17L bytes long, This method is used for creating both the primary and secondary
+     * indexes. Chronicle Queue uses a root primary index ( each entry in the primary index points to a unique a secondary index. The secondary index
+     * only records the addressForRead of every 64th except, the except are linearly scanned from there on.  )
+     *
+     * @param wire the current wire
+     * @return the addressForRead of the Excerpt containing the usable index, just after the header
+     */
+    long newIndex(@NotNull WireOut wire, boolean index2index) throws StreamCorruptedException {
+<span class="fc" id="L205">        long writePosition = this.writePosition.getVolatileValue();</span>
+<span class="fc" id="L206">        Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="fc" id="L207">        bytes.writePosition(writePosition);</span>
+
+<span class="fc" id="L209">        long position = wire.enterHeader(indexCount * 8 + 128);</span>
+
+<span class="fc bfc" id="L211" title="All 2 branches covered.">        WriteMarshallable writer = index2index ? index2IndexTemplate : indexTemplate;</span>
+<span class="fc" id="L212">        writer.writeMarshallable(wire);</span>
+<span class="fc" id="L213">        wire.updateHeader(position, true, 0);</span>
+
+<span class="fc" id="L215">        return position;</span>
+    }
+
+    long newIndex(@NotNull Wire wire, @NotNull LongArrayValues index2Index, long index2) throws StreamCorruptedException {
+        try {
+<span class="fc" id="L220">            long pos = newIndex(wire, false);</span>
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">            if (!index2Index.compareAndSet(index2, NOT_INITIALIZED, pos)) {</span>
+<span class="nc" id="L222">                throw new IllegalStateException(&quot;Index &quot; + index2 + &quot; in index2index was altered while we hold the write lock!&quot;);</span>
+            }
+<span class="fc" id="L224">            index2Index.setMaxUsed(index2 + 1);</span>
+<span class="fc" id="L225">            return pos;</span>
+<span class="nc" id="L226">        } catch (Exception e) {</span>
+<span class="nc" id="L227">            throw e;</span>
+        }
+    }
+
+    /**
+     * Moves the position to the {@code index} &lt;p&gt; The indexes are stored in many excerpts, so the index2index tells chronicle where ( in other words
+     * the addressForRead of where ) the root first level targetIndex is stored. The indexing works like a tree, but only 2 levels deep, the root of
+     * the tree is at index2index ( this first level targetIndex is 1MB in size and there is only one of them, it only holds the addresses of the
+     * second level indexes, there will be many second level indexes ( created on demand ), each is about 1MB in size  (this second level targetIndex
+     * only stores the position of every 64th excerpt (depending on RollCycle)), so from every 64th excerpt a linear scan occurs.
+     *
+     * @param ec    the data structure we are navigating
+     * @param index the index we wish to move to
+     * @return the position of the {@code targetIndex} or -1 if the index can not be found
+     */
+    @NotNull
+    ScanResult moveToIndex(@NotNull final ExcerptContext ec, final long index) {
+<span class="fc" id="L244">        ScanResult value = moveToIndex0(ec, index);</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">        if (value == null)</span>
+<span class="fc" id="L246">            return moveToIndexFromTheStart(ec, index);</span>
+<span class="fc" id="L247">        return value;</span>
+    }
+
+    @NotNull
+    private ScanResult moveToIndexFromTheStart(@NotNull ExcerptContext ec, long index) {
+        try {
+<span class="fc" id="L253">            Wire wire = ec.wire();</span>
+<span class="fc" id="L254">            wire.bytes().readPositionUnlimited(0);</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">            if (wire.readDataHeader())</span>
+<span class="fc" id="L256">                return linearScan(wire, index, 0, wire.bytes().readPosition());</span>
+<span class="nc" id="L257">        } catch (EOFException fallback) {</span>
+<span class="nc" id="L258">            return ScanResult.END_OF_FILE;</span>
+<span class="fc" id="L259">        }</span>
+<span class="fc" id="L260">        return ScanResult.NOT_FOUND;</span>
+    }
+
+    // visible for testing
+    @Nullable
+    ScanResult moveToIndex0(@NotNull final ExcerptContext ec, final long index) {
+
+        try {
+<span class="fc" id="L268">            Wire wire = ec.wireForIndex();</span>
+<span class="fc" id="L269">            LongArrayValues index2index = getIndex2index(wire);</span>
+<span class="fc" id="L270">            long primaryOffset = toAddress0(index);</span>
+
+<span class="fc" id="L272">            long secondaryAddress = 0;</span>
+<span class="fc" id="L273">            long startIndex = index &amp; -indexSpacing;</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">            while (primaryOffset &gt;= 0) {</span>
+<span class="fc" id="L275">                secondaryAddress = index2index.getValueAt(primaryOffset);</span>
+<span class="fc bfc" id="L276" title="All 2 branches covered.">                if (secondaryAddress != 0)</span>
+<span class="fc" id="L277">                    break;</span>
+<span class="fc" id="L278">                startIndex -= indexCount * indexSpacing;</span>
+<span class="fc" id="L279">                primaryOffset--;</span>
+            }
+
+<span class="fc bfc" id="L282" title="All 2 branches covered.">            if (secondaryAddress &lt;= 0) {</span>
+<span class="fc" id="L283">                return null;</span>
+            }
+<span class="fc" id="L285">            @NotNull final LongArrayValues array1 = arrayForAddress(wire, secondaryAddress);</span>
+<span class="fc" id="L286">            long secondaryOffset = toAddress1(index);</span>
+
+            do {
+<span class="fc" id="L289">                long fromAddress = array1.getValueAt(secondaryOffset);</span>
+<span class="fc bfc" id="L290" title="All 2 branches covered.">                if (fromAddress == 0) {</span>
+<span class="fc" id="L291">                    secondaryOffset--;</span>
+<span class="fc" id="L292">                    startIndex -= indexSpacing;</span>
+<span class="fc" id="L293">                    continue;</span>
+                }
+
+<span class="fc bfc" id="L296" title="All 2 branches covered.">                if (index == startIndex) {</span>
+<span class="fc" id="L297">                    ec.wire().bytes().readPositionUnlimited(fromAddress);</span>
+<span class="fc" id="L298">                    return ScanResult.FOUND;</span>
+                } else {
+<span class="fc" id="L300">                    return linearScan(ec.wire(), index, startIndex, fromAddress);</span>
+                }
+<span class="fc bfc" id="L302" title="All 2 branches covered.">            } while (secondaryOffset &gt;= 0);</span>
+<span class="fc" id="L303">            return null; // no index,</span>
+<span class="nc" id="L304">        } catch (IllegalStateException e) {</span>
+<span class="nc" id="L305">            return linearScan(ec.wire(), index, -1, 0);</span>
+        }
+    }
+
+    /**
+     * moves the context to the index of {@code toIndex} by doing a linear scans form a {@code fromKnownIndex} at  {@code knownAddress} &lt;p&gt; note meta
+     * data is skipped and does not count to the indexes
+     *
+     * @param wire           if successful, moves the context to an addressForRead relating to the index {@code toIndex }
+     * @param toIndex        the index that we wish to move the context to
+     * @param fromKnownIndex a know index ( used as a starting point )
+     * @param knownAddress   a know addressForRead ( used as a starting point )
+     * @see SCQIndexing#moveToIndex
+     */
+
+    @NotNull
+    private ScanResult linearScan(@NotNull final Wire wire,
+                                  final long toIndex,
+                                  final long fromKnownIndex,
+                                  final long knownAddress) {
+<span class="fc" id="L325">        long start = System.nanoTime();</span>
+<span class="fc bfc" id="L326" title="All 2 branches covered.">        if (toIndex == fromKnownIndex)</span>
+<span class="fc" id="L327">            return ScanResult.FOUND;</span>
+<span class="fc" id="L328">        ScanResult scanResult = linearScan0(wire, toIndex, fromKnownIndex, knownAddress);</span>
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">        if (REPORT_LINEAR_SCAN)</span>
+<span class="nc" id="L330">            checkLinearScanTime(toIndex, fromKnownIndex, start);</span>
+<span class="fc" id="L331">        return scanResult;</span>
+    }
+
+    private void checkLinearScanTime(final long toIndex, final long fromKnownIndex, final long
+            start) {
+<span class="nc" id="L336">        boolean assertOn = false;</span>
+<span class="nc bnc" id="L337" title="All 4 branches missed.">        assert assertOn = true;</span>
+        //noinspection ConstantConditions
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (!assertOn)</span>
+<span class="nc" id="L340">            return;</span>
+
+<span class="nc" id="L342">        long end = System.nanoTime();</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">        if (end &gt; start + 100_000) {</span>
+<span class="nc" id="L344">            printLinearScanTime(toIndex, fromKnownIndex, start, end, &quot;linearScan by index&quot;);</span>
+        }
+<span class="nc" id="L346">    }</span>
+
+    private boolean printLinearScanTime(long toIndex, long fromKnownIndex, long start, long end,
+                                        String desc) {
+<span class="fc" id="L350">        StackTrace st = null;</span>
+<span class="pc bpc" id="L351" title="1 of 2 branches missed.">        if (Jvm.isDebugEnabled(getClass())) {</span>
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">            int time = Jvm.isArm() ? 20_000_000 : 250_000;</span>
+            // ignore the time for the first message
+<span class="pc bpc" id="L354" title="1 of 4 branches missed.">            if (toIndex &gt; 0 &amp;&amp; end &gt; start + time)</span>
+<span class="nc" id="L355">                st = new StackTrace(&quot;This is a profile stack trace, not an ERROR&quot;);</span>
+        }
+
+<span class="fc" id="L358">        long tookUS = (end - start) / 1000;</span>
+<span class="fc" id="L359">        Jvm.perf().on(getClass(), &quot;Took &quot; + tookUS + &quot; us to &quot; + desc + &quot; from &quot; +</span>
+<span class="fc" id="L360">                        fromKnownIndex + &quot; to &quot; + toIndex + &quot; = (0x&quot; + Long.toHexString(toIndex)</span>
+<span class="fc" id="L361">                        + &quot;-0x&quot; + Long.toHexString(fromKnownIndex) + &quot;)=&quot; +</span>
+                        (toIndex - fromKnownIndex),
+                st);
+<span class="fc" id="L364">        return true;</span>
+    }
+
+    @NotNull
+    private ScanResult linearScan0(@NotNull final Wire wire,
+                                   final long toIndex,
+                                   long fromKnownIndex,
+                                   long knownAddress) {
+<span class="fc" id="L372">        this.linearScanCount++;</span>
+<span class="fc" id="L373">        @NotNull final Bytes&lt;?&gt; bytes = wire.bytes();</span>
+
+        // optimized if the `toIndex` is the last sequence
+<span class="fc" id="L376">        long lastAddress = writePosition.getVolatileValue();</span>
+<span class="fc" id="L377">        long lastIndex = this.sequence.getSequence(lastAddress);</span>
+<span class="fc bfc" id="L378" title="All 2 branches covered.">        if (toIndex == lastIndex) {</span>
+<span class="pc bpc" id="L379" title="3 of 6 branches missed.">            assert (lastAddress &gt;= knownAddress &amp;&amp; lastIndex &gt;= fromKnownIndex);</span>
+<span class="fc" id="L380">            knownAddress = lastAddress;</span>
+<span class="fc" id="L381">            fromKnownIndex = lastIndex;</span>
+        }
+
+<span class="fc" id="L384">        bytes.readPositionUnlimited(knownAddress);</span>
+
+<span class="fc" id="L386">        for (long i = fromKnownIndex; ; i++) {</span>
+            try {
+<span class="fc bfc" id="L388" title="All 2 branches covered.">                if (wire.readDataHeader()) {</span>
+<span class="fc bfc" id="L389" title="All 2 branches covered.">                    if (i == toIndex) {</span>
+<span class="fc" id="L390">                        return ScanResult.FOUND;</span>
+                    }
+<span class="fc" id="L392">                    int header = bytes.readVolatileInt();</span>
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">                    if (Wires.isNotComplete(header)) { // or isEndOfFile</span>
+<span class="nc" id="L394">                        return ScanResult.NOT_REACHED;</span>
+                    }
+<span class="fc" id="L396">                    bytes.readSkip(Wires.lengthOf(header));</span>
+<span class="fc" id="L397">                    continue;</span>
+                }
+<span class="nc" id="L399">            } catch (EOFException fallback) {</span>
+                // reached the end of the file.
+<span class="nc bnc" id="L401" title="All 2 branches missed.">                if (i == toIndex) {</span>
+<span class="nc" id="L402">                    return ScanResult.END_OF_FILE;</span>
+                }
+<span class="fc" id="L404">            }</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">            return i == toIndex ? ScanResult.NOT_FOUND : ScanResult.NOT_REACHED;</span>
+        }
+    }
+
+    ScanResult linearScanTo(final long toIndex, final long knownIndex, final ExcerptContext ec, final long knownAddress) {
+<span class="fc" id="L410">        return linearScan(ec.wire(), toIndex, knownIndex, knownAddress);</span>
+    }
+
+    long linearScanByPosition(@NotNull final Wire wire,
+                              final long toPosition,
+                              final long indexOfNext,
+                              final long startAddress,
+                              boolean inclusive) throws EOFException {
+<span class="fc" id="L418">        long start = System.nanoTime();</span>
+<span class="fc" id="L419">        long index = linearScanByPosition0(wire, toPosition, indexOfNext, startAddress, inclusive);</span>
+<span class="fc" id="L420">        long end = System.nanoTime();</span>
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">        int time = Jvm.isArm() ? 1_000_000 : 100_000;</span>
+<span class="fc bfc" id="L422" title="All 2 branches covered.">        if (end &gt; start + time) {</span>
+<span class="fc" id="L423">            printLinearScanTime(toPosition, startAddress, start, end, &quot;linearScan by position&quot;);</span>
+        }
+<span class="fc" id="L425">        return index;</span>
+    }
+
+    long linearScanByPosition0(@NotNull final Wire wire,
+                               final long toPosition,
+                               long indexOfNext,
+                               long startAddress,
+                               boolean inclusive) throws EOFException {
+<span class="pc bpc" id="L433" title="2 of 4 branches missed.">        assert toPosition &gt;= 0;</span>
+<span class="fc" id="L434">        Bytes&lt;?&gt; bytes = wire.bytes();</span>
+        long i;
+        // optimized if the `toPosition` is the writePosition
+<span class="fc" id="L437">        long lastAddress = writePosition.getVolatileValue();</span>
+<span class="fc" id="L438">        long lastIndex = this.sequence.getSequence(lastAddress);</span>
+
+<span class="pc bpc" id="L440" title="2 of 8 branches missed.">        if (lastAddress &gt; 0 &amp;&amp; toPosition == lastAddress</span>
+                &amp;&amp; lastIndex != Sequence.NOT_FOUND &amp;&amp; lastIndex != Sequence.NOT_FOUND_RETRY) {
+<span class="fc" id="L442">            bytes.readPositionUnlimited(toPosition);</span>
+<span class="fc" id="L443">            i = lastIndex - 1;</span>
+        } else {
+<span class="fc" id="L445">            bytes.readPositionUnlimited(startAddress);</span>
+<span class="fc" id="L446">            i = indexOfNext - 1;</span>
+        }
+
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">        while (bytes.readPosition() &lt;= toPosition) {</span>
+<span class="fc" id="L450">            WireIn.HeaderType headerType = wire.readDataHeader(true);</span>
+<span class="pc bpc" id="L451" title="1 of 2 branches missed.">            if (headerType == WireIn.HeaderType.EOF) {</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                if (toPosition == Long.MAX_VALUE)</span>
+<span class="nc" id="L453">                    return i;</span>
+<span class="nc" id="L454">                throw new EOFException();</span>
+            }
+
+<span class="pc bpc" id="L457" title="1 of 4 branches missed.">            if (!inclusive &amp;&amp; toPosition == bytes.readPosition())</span>
+<span class="nc" id="L458">                return i;</span>
+
+<span class="pc bpc" id="L460" title="1 of 4 branches missed.">            switch (headerType) {</span>
+                case NONE:
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">                    if (toPosition == Long.MAX_VALUE) {</span>
+<span class="fc" id="L463">                        return i;</span>
+                    }
+
+<span class="nc" id="L466">                    int header = bytes.readVolatileInt(bytes.readPosition());</span>
+<span class="nc" id="L467">                    throw new IllegalArgumentException(</span>
+                            &quot;You can't know the index for an entry which hasn't been written. &quot; +
+                                    &quot;start: &quot; + startAddress +
+<span class="nc" id="L470">                                    &quot;, at: &quot; + bytes.readPosition() +</span>
+<span class="nc" id="L471">                                    &quot;, header: &quot; + Integer.toHexString(header) +</span>
+                                    &quot;, toPos: &quot; + toPosition);
+                case META_DATA:
+<span class="fc" id="L474">                    break;</span>
+                case DATA:
+<span class="fc" id="L476">                    ++i;</span>
+                    break;
+            }
+
+<span class="fc bfc" id="L480" title="All 2 branches covered.">            if (bytes.readPosition() == toPosition)</span>
+<span class="fc" id="L481">                return i;</span>
+
+<span class="fc" id="L483">            int header = bytes.readVolatileInt();</span>
+<span class="fc" id="L484">            int len = Wires.lengthOf(header);</span>
+<span class="pc bpc" id="L485" title="2 of 4 branches missed.">            assert Wires.isReady(header);</span>
+<span class="fc" id="L486">            bytes.readSkip(len);</span>
+<span class="fc" id="L487">        }</span>
+
+<span class="nc" id="L489">        throw new IllegalArgumentException(&quot;position not the start of a message, bytes&quot; +</span>
+<span class="nc" id="L490">                &quot;.readPosition()=&quot; + bytes.readPosition() + &quot;,toPosition=&quot; + toPosition);</span>
+    }
+
+    long nextEntryToBeIndexed() {
+<span class="fc" id="L494">        return nextEntryToBeIndexed.getVolatileValue();</span>
+    }
+
+    long sequenceForPosition(@NotNull ExcerptContext ec,
+                             final long position,
+                             boolean inclusive) throws StreamCorruptedException {
+<span class="fc" id="L500">        long indexOfNext = 0;</span>
+<span class="fc" id="L501">        long lastKnownAddress = 0;</span>
+<span class="fc" id="L502">        @NotNull Wire wire = ec.wireForIndex();</span>
+        try {
+<span class="fc" id="L504">            final LongArrayValues index2indexArr = getIndex2index(wire);</span>
+
+<span class="fc" id="L506">            int used2 = Maths.toUInt31(index2indexArr.getUsed());</span>
+<span class="pc bpc" id="L507" title="2 of 4 branches missed.">            assert used2 &gt; 0;</span>
+            Outer:
+<span class="fc bfc" id="L509" title="All 2 branches covered.">            for (int index2 = used2 - 1; index2 &gt;= 0; index2--) {</span>
+<span class="fc" id="L510">                long secondaryAddress = getSecondaryAddress(wire, index2indexArr, index2);</span>
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">                if (secondaryAddress == 0)</span>
+<span class="nc" id="L512">                    continue;</span>
+
+<span class="fc" id="L514">                LongArrayValues indexValues = arrayForAddress(wire, secondaryAddress);</span>
+                // TODO use a binary rather than linear search
+
+                // check the first one to see if any in the index is appropriate.
+<span class="fc" id="L518">                int used = Maths.toUInt31(indexValues.getUsed());</span>
+<span class="pc bpc" id="L519" title="2 of 4 branches missed.">                assert used &gt;= 0;</span>
+<span class="fc bfc" id="L520" title="All 2 branches covered.">                if (used == 0)</span>
+<span class="fc" id="L521">                    continue;</span>
+
+<span class="fc" id="L523">                long posN = indexValues.getVolatileValueAt(0);</span>
+<span class="pc bpc" id="L524" title="2 of 4 branches missed.">                assert posN &gt;= 0;</span>
+<span class="pc bpc" id="L525" title="1 of 2 branches missed.">                if (posN &gt; position)</span>
+<span class="nc" id="L526">                    continue;</span>
+
+<span class="pc bpc" id="L528" title="1 of 2 branches missed.">                for (int index1 = used - 1; index1 &gt;= 0; index1--) {</span>
+<span class="fc" id="L529">                    long pos = indexValues.getVolatileValueAt(index1);</span>
+                    // TODO pos shouldn't be 0, but holes in the index appear..
+<span class="pc bpc" id="L531" title="2 of 4 branches missed.">                    if (pos == 0 || pos &gt; position) {</span>
+<span class="nc" id="L532">                        continue;</span>
+                    }
+<span class="fc" id="L534">                    lastKnownAddress = pos;</span>
+<span class="fc" id="L535">                    indexOfNext = ((long) index2 &lt;&lt; (indexCountBits + indexSpacingBits)) + (index1 &lt;&lt; indexSpacingBits);</span>
+
+<span class="fc bfc" id="L537" title="All 2 branches covered.">                    if (lastKnownAddress == position)</span>
+<span class="fc" id="L538">                        return indexOfNext;</span>
+
+                    break Outer;
+                }
+            }
+<span class="nc" id="L543">        } catch (IllegalStateException e) {</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">            if (Jvm.isDebugEnabled(getClass()))</span>
+<span class="nc" id="L545">                Jvm.debug().on(getClass(), &quot;Attempt to find &quot; + Long.toHexString(position), e);</span>
+<span class="fc" id="L546">        }</span>
+        try {
+<span class="fc" id="L548">            return linearScanByPosition(wire, position, indexOfNext, lastKnownAddress, inclusive);</span>
+<span class="nc" id="L549">        } catch (EOFException e) {</span>
+<span class="nc" id="L550">            throw new IllegalStateException(e);</span>
+        }
+    }
+
+    void initIndex(@NotNull Wire wire) throws StreamCorruptedException {
+<span class="fc" id="L555">        long index2Index = this.index2Index.getVolatileValue();</span>
+
+<span class="pc bpc" id="L557" title="1 of 2 branches missed.">        if (index2Index != NOT_INITIALIZED)</span>
+<span class="nc" id="L558">            throw new IllegalStateException(&quot;Who wrote the index2index?&quot;);</span>
+
+<span class="fc" id="L560">        long index = newIndex(wire, true);</span>
+<span class="fc" id="L561">        this.index2Index.compareAndSwapValue(NOT_INITIALIZED, index);</span>
+
+<span class="fc" id="L563">        LongArrayValues index2index = getIndex2index(wire);</span>
+<span class="fc" id="L564">        newIndex(wire, index2index, 0);</span>
+<span class="fc" id="L565">    }</span>
+
+    private LongArrayValues getIndex2index(@NotNull Wire wire) throws UnrecoverableTimeoutException {
+
+<span class="fc" id="L569">        LongArrayValuesHolder holder = getIndex2IndexArray();</span>
+<span class="fc" id="L570">        LongArrayValues values = holder.values;</span>
+<span class="fc bfc" id="L571" title="All 2 branches covered.">        if (((Byteable) values).bytesStore() != null)</span>
+<span class="fc" id="L572">            return values;</span>
+<span class="fc" id="L573">        final long indexToIndex = index2Index.getVolatileValue();</span>
+
+<span class="fc" id="L575">        try (DocumentContext ignored = wire.readingDocument(indexToIndex)) {</span>
+<span class="fc" id="L576">            return array(wire, values, true);</span>
+        }
+    }
+
+    private long getSecondaryAddress(@NotNull Wire wire, @NotNull LongArrayValues index2indexArr, int index2)
+            throws UnrecoverableTimeoutException, StreamCorruptedException {
+<span class="fc" id="L582">        long secondaryAddress = index2indexArr.getVolatileValueAt(index2);</span>
+<span class="fc bfc" id="L583" title="All 2 branches covered.">        if (secondaryAddress == 0) {</span>
+<span class="fc" id="L584">            secondaryAddress = newIndex(wire, index2indexArr, index2);</span>
+<span class="fc" id="L585">            long sa = index2indexArr.getValueAt(index2);</span>
+<span class="pc bpc" id="L586" title="1 of 2 branches missed.">            if (sa != secondaryAddress)</span>
+<span class="nc" id="L587">                throw new AssertionError();</span>
+        }
+
+<span class="fc" id="L590">        return secondaryAddress;</span>
+    }
+
+    /**
+     * add an entry to the sequenceNumber, so stores the position of an sequenceNumber
+     *
+     * @param ec             the wire that used to store the data
+     * @param sequenceNumber the sequenceNumber that the data will be stored to
+     * @param position       the position the data is at
+     * @throws UnrecoverableTimeoutException todo
+     * @throws StreamCorruptedException      todo
+     */
+    void setPositionForSequenceNumber(@NotNull ExcerptContext ec,
+                                      long sequenceNumber,
+                                      long position) throws UnrecoverableTimeoutException, StreamCorruptedException {
+
+        // only say for example index every 0,15,31st entry
+<span class="pc bpc" id="L607" title="1 of 2 branches missed.">        if (!indexable(sequenceNumber)) {</span>
+<span class="nc" id="L608">            return;</span>
+        }
+
+<span class="fc" id="L611">        Wire wire = ec.wireForIndex();</span>
+<span class="fc" id="L612">        Bytes&lt;?&gt; bytes = wire.bytes();</span>
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">        if (position &gt; bytes.capacity())</span>
+<span class="nc" id="L614">            throw new IllegalArgumentException(&quot;pos: &quot; + position);</span>
+
+        // find the index2index
+<span class="fc" id="L617">        final LongArrayValues index2indexArr = getIndex2index(wire);</span>
+<span class="pc bpc" id="L618" title="1 of 2 branches missed.">        if (((Byteable) index2indexArr).bytesStore() == null) {</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">            assert false;</span>
+<span class="nc" id="L620">            return;</span>
+        }
+
+<span class="fc" id="L623">        int index2 = (int) ((sequenceNumber) &gt;&gt;&gt; (indexCountBits + indexSpacingBits));</span>
+<span class="pc bpc" id="L624" title="1 of 2 branches missed.">        if (index2 &gt;= indexCount) {</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">            if (IGNORE_INDEXING_FAILURE) {</span>
+<span class="nc" id="L626">                return;</span>
+            }
+<span class="nc" id="L628">            throw new IllegalStateException(&quot;Unable to index &quot; + sequenceNumber + &quot;, the number of entries exceeds max number for the current rollcycle&quot;);</span>
+        }
+<span class="fc" id="L630">        long secondaryAddress = getSecondaryAddress(wire, index2indexArr, index2);</span>
+<span class="pc bpc" id="L631" title="1 of 2 branches missed.">        if (secondaryAddress &gt; bytes.capacity())</span>
+<span class="nc" id="L632">            throw new IllegalStateException(&quot;sa2: &quot; + secondaryAddress);</span>
+<span class="fc" id="L633">        bytes.readLimitToCapacity();</span>
+<span class="fc" id="L634">        LongArrayValues indexValues = arrayForAddress(wire, secondaryAddress);</span>
+<span class="fc" id="L635">        int index3 = (int) ((sequenceNumber &gt;&gt;&gt; indexSpacingBits) &amp; (indexCount - 1));</span>
+
+        // check the last one first.
+<span class="fc" id="L638">        long posN = indexValues.getValueAt(index3);</span>
+<span class="pc bpc" id="L639" title="1 of 2 branches missed.">        if (posN == 0) {</span>
+<span class="fc" id="L640">            indexValues.setValueAt(index3, position);</span>
+<span class="fc" id="L641">            indexValues.setMaxUsed(index3 + 1L);</span>
+        } else {
+<span class="nc bnc" id="L643" title="All 4 branches missed.">            assert posN == position;</span>
+        }
+<span class="fc" id="L645">        nextEntryToBeIndexed.setMaxValue(sequenceNumber + indexSpacing);</span>
+<span class="fc" id="L646">    }</span>
+
+    public boolean indexable(long index) {
+<span class="fc" id="L649">        throwExceptionIfClosed();</span>
+
+<span class="pc bpc" id="L651" title="1 of 2 branches missed.">        return (index &amp; (indexSpacing - 1)) == 0;</span>
+    }
+
+    public long lastSequenceNumber(@NotNull ExcerptContext ec)
+            throws StreamCorruptedException {
+<span class="fc" id="L656">        throwExceptionIfClosed();</span>
+
+<span class="fc" id="L658">        Sequence sequence1 = this.sequence;</span>
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">        if (sequence1 != null) {</span>
+<span class="pc bpc" id="L660" title="1 of 2 branches missed.">            for (int i = 0; i &lt; 128; i++) {</span>
+
+<span class="fc" id="L662">                long address = writePosition.getVolatileValue(0);</span>
+<span class="fc bfc" id="L663" title="All 2 branches covered.">                if (address == 0)</span>
+<span class="fc" id="L664">                    return -1;</span>
+<span class="fc" id="L665">                long sequence = sequence1.getSequence(address);</span>
+<span class="pc bpc" id="L666" title="1 of 2 branches missed.">                if (sequence == Sequence.NOT_FOUND_RETRY)</span>
+<span class="nc" id="L667">                    continue;</span>
+<span class="pc bpc" id="L668" title="1 of 2 branches missed.">                if (sequence == Sequence.NOT_FOUND)</span>
+<span class="nc" id="L669">                    break;</span>
+<span class="fc" id="L670">                return sequence;</span>
+            }
+        }
+
+<span class="nc" id="L674">        return sequenceForPosition(ec, Long.MAX_VALUE, false);</span>
+    }
+
+    @Override
+    protected boolean threadSafetyCheck(boolean isUsed) {
+<span class="fc" id="L679">        return true;</span>
+    }
+
+    int indexCount() {
+<span class="fc" id="L683">        return indexCount;</span>
+    }
+
+    int indexSpacing() {
+<span class="fc" id="L687">        return indexSpacing;</span>
+    }
+
+    long moveToEnd(final Wire wire) {
+<span class="fc" id="L691">        Sequence sequence1 = this.sequence;</span>
+<span class="pc bpc" id="L692" title="1 of 2 branches missed.">        if (sequence1 != null) {</span>
+<span class="pc bpc" id="L693" title="1 of 2 branches missed.">            for (int i = 0; i &lt; 128; i++) {</span>
+
+<span class="fc" id="L695">                long endAddress = writePosition.getVolatileValue(0);</span>
+<span class="fc bfc" id="L696" title="All 2 branches covered.">                if (endAddress == 0)</span>
+<span class="fc" id="L697">                    return -1;</span>
+<span class="fc" id="L698">                long sequence = sequence1.getSequence(endAddress);</span>
+<span class="pc bpc" id="L699" title="1 of 2 branches missed.">                if (sequence == Sequence.NOT_FOUND_RETRY)</span>
+<span class="nc" id="L700">                    continue;</span>
+<span class="pc bpc" id="L701" title="1 of 2 branches missed.">                if (sequence == Sequence.NOT_FOUND)</span>
+<span class="nc" id="L702">                    return -1;</span>
+
+<span class="fc" id="L704">                Bytes&lt;?&gt; bytes = wire.bytes();</span>
+
+<span class="fc" id="L706">                bytes.readPosition(endAddress);</span>
+
+                for (; ; ) {
+<span class="fc" id="L709">                    long paddingShift = 0L;</span>
+<span class="pc bpc" id="L710" title="1 of 2 branches missed.">                    if (wire.usePadding()) {</span>
+<span class="fc" id="L711">                        paddingShift = -endAddress &amp; 0x3;</span>
+
+<span class="fc" id="L713">                        endAddress += paddingShift;</span>
+                    }
+<span class="fc" id="L715">                    int header = bytes.readVolatileInt(endAddress);</span>
+<span class="fc bfc" id="L716" title="All 4 branches covered.">                    if (header == 0 || Wires.isNotComplete(header))</span>
+<span class="fc" id="L717">                        return sequence;</span>
+
+<span class="fc" id="L719">                    int len = Wires.lengthOf(header) + 4;</span>
+
+<span class="fc" id="L721">                    bytes.readSkip(len + paddingShift);</span>
+<span class="fc" id="L722">                    endAddress += len;</span>
+
+<span class="fc bfc" id="L724" title="All 2 branches covered.">                    if (Wires.isData(header))</span>
+<span class="fc" id="L725">                        sequence += 1;</span>
+
+<span class="fc" id="L727">                }</span>
+            }
+        }
+<span class="nc" id="L730">        return -1;</span>
+    }
+
+<span class="fc" id="L733">    enum IndexingFields implements WireKey {</span>
+<span class="fc" id="L734">        indexCount, indexSpacing, index2Index,</span>
+<span class="fc" id="L735">        lastIndex // NOTE: the nextEntryToBeIndexed</span>
+    }
+
+    static class LongArrayValuesHolder extends AbstractCloseable {
+        final LongArrayValues values;
+        long address;
+
+<span class="fc" id="L742">        LongArrayValuesHolder(LongArrayValues values) {</span>
+<span class="fc" id="L743">            this.values = values;</span>
+<span class="fc" id="L744">            address = Long.MIN_VALUE;</span>
+<span class="fc" id="L745">        }</span>
+
+        @Override
+        protected void performClose() {
+<span class="fc" id="L749">            values.close();</span>
+<span class="fc" id="L750">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

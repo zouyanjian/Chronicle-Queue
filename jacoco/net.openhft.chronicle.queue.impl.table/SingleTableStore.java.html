@@ -1,0 +1,329 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleTableStore.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.table</a> &gt; <span class="el_source">SingleTableStore.java</span></div><h1>SingleTableStore.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.table;
+
+import net.openhft.chronicle.bytes.MappedBytes;
+import net.openhft.chronicle.bytes.MappedFile;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.Maths;
+import net.openhft.chronicle.core.StackTrace;
+import net.openhft.chronicle.core.annotation.UsedViaReflection;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.ClosedIllegalStateException;
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.core.util.StringUtils;
+import net.openhft.chronicle.core.values.LongValue;
+import net.openhft.chronicle.queue.impl.TableStore;
+import net.openhft.chronicle.queue.impl.single.MetaDataField;
+import net.openhft.chronicle.wire.*;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.EOFException;
+import java.io.File;
+import java.io.IOException;
+import java.io.StreamCorruptedException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.StandardOpenOption;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static net.openhft.chronicle.core.util.Time.sleep;
+
+<span class="pc bpc" id="L51" title="1 of 2 branches missed.">public class SingleTableStore&lt;T extends Metadata&gt; extends AbstractCloseable implements TableStore&lt;T&gt; {</span>
+    public static final String SUFFIX = &quot;.cq4t&quot;;
+
+<span class="fc" id="L54">    private static final long timeoutMS = Long.getLong(&quot;chronicle.table.store.timeoutMS&quot;, 10_000);</span>
+    @NotNull
+    private final WireType wireType;
+    @NotNull
+    private final T metadata;
+    @NotNull
+    private final MappedBytes mappedBytes;
+    @NotNull
+    private final MappedFile mappedFile;
+    @NotNull
+    private final Wire mappedWire;
+
+    /**
+     * used by {@link Demarshallable}
+     *
+     * @param wire a wire
+     */
+    @SuppressWarnings(&quot;unused&quot;)
+    @UsedViaReflection
+<span class="fc" id="L73">    private SingleTableStore(@NotNull final WireIn wire) {</span>
+<span class="pc bpc" id="L74" title="2 of 4 branches missed.">        assert wire.startUse();</span>
+        try {
+<span class="fc" id="L76">            this.wireType = Objects.requireNonNull(wire.read(MetaDataField.wireType).object(WireType.class));</span>
+<span class="fc" id="L77">            this.mappedBytes = (MappedBytes) (wire.bytes());</span>
+<span class="fc" id="L78">            this.mappedFile = mappedBytes.mappedFile();</span>
+
+<span class="fc" id="L80">            wire.consumePadding();</span>
+<span class="fc bfc" id="L81" title="All 2 branches covered.">            if (wire.bytes().readRemaining() &gt; 0) {</span>
+<span class="fc" id="L82">                this.metadata = Objects.requireNonNull(wire.read(MetaDataField.metadata).typedMarshallable());</span>
+            } else {
+                //noinspection unchecked
+<span class="fc" id="L85">                this.metadata = (T) Metadata.NoMeta.INSTANCE;</span>
+            }
+
+<span class="fc" id="L88">            mappedWire = wireType.apply(mappedBytes);</span>
+        } finally {
+<span class="pc bpc" id="L90" title="2 of 4 branches missed.">            assert wire.endUse();</span>
+        }
+<span class="fc" id="L92">    }</span>
+
+    /**
+     * @param wireType    the wire type that is being used
+     * @param mappedBytes used to mapped the data store file
+     */
+    SingleTableStore(@NotNull final WireType wireType,
+                     @NotNull final MappedBytes mappedBytes,
+<span class="fc" id="L100">                     @NotNull final T metadata) {</span>
+<span class="fc" id="L101">        this.wireType = wireType;</span>
+<span class="fc" id="L102">        this.metadata = metadata;</span>
+<span class="fc" id="L103">        this.mappedBytes = mappedBytes;</span>
+<span class="fc" id="L104">        this.mappedFile = mappedBytes.mappedFile();</span>
+<span class="fc" id="L105">        mappedWire = wireType.apply(mappedBytes);</span>
+<span class="fc" id="L106">    }</span>
+
+    public static &lt;T, R&gt; R doWithSharedLock(@NotNull final File file,
+                                            @NotNull final Function&lt;T, ? extends R&gt; code,
+                                            @NotNull final Supplier&lt;T&gt; target) {
+<span class="fc" id="L111">        return doWithLock(file, code, target, true);</span>
+    }
+
+    public static &lt;T, R&gt; R doWithExclusiveLock(@NotNull final File file,
+                                               @NotNull final Function&lt;T, ? extends R&gt; code,
+                                               @NotNull final Supplier&lt;T&gt; target) {
+<span class="fc" id="L117">        return doWithLock(file, code, target, false);</span>
+    }
+
+    // shared vs exclusive - see https://docs.oracle.com/javase/7/docs/api/java/nio/channels/FileChannel.html
+    private static &lt;T, R&gt; R doWithLock(@NotNull final File file,
+                                       @NotNull final Function&lt;T, ? extends R&gt; code,
+                                       @NotNull final Supplier&lt;T&gt; target,
+                                       final boolean shared) {
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        final String type = shared ? &quot;shared&quot; : &quot;exclusive&quot;;</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        final StandardOpenOption readOrWrite = shared ? StandardOpenOption.READ : StandardOpenOption.WRITE;</span>
+
+<span class="fc" id="L128">        final long timeoutAt = System.currentTimeMillis() + timeoutMS;</span>
+<span class="fc" id="L129">        final long startMs = System.currentTimeMillis();</span>
+<span class="fc" id="L130">        try (final FileChannel channel = FileChannel.open(file.toPath(), readOrWrite)) {</span>
+<span class="pc bpc" id="L131" title="1 of 2 branches missed.">            for (int count = 1; System.currentTimeMillis() &lt; timeoutAt; count++) {</span>
+<span class="fc" id="L132">                try (FileLock fileLock = channel.tryLock(0L, Long.MAX_VALUE, shared)) {</span>
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">                    if (fileLock != null) {</span>
+<span class="fc" id="L134">                        return code.apply(target.get());</span>
+                    }
+<span class="fc" id="L136">                } catch (IOException | OverlappingFileLockException e) {</span>
+                    // failed to acquire the lock, wait until other operation completes
+<span class="fc bfc" id="L138" title="All 2 branches covered.">                    if (count &gt; 9) {</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">                        if (Jvm.isDebugEnabled(SingleTableStore.class)) {</span>
+<span class="fc" id="L140">                            final long elapsedMs = System.currentTimeMillis() - startMs;</span>
+<span class="fc" id="L141">                            final String message = &quot;Failed to acquire &quot; + type + &quot; lock on the table store file. Retrying, file=&quot; + file.getAbsolutePath() + &quot;, count=&quot; + count + &quot;, elapsed=&quot; + elapsedMs + &quot; ms&quot;;</span>
+<span class="fc" id="L142">                            Jvm.debug().on(SingleTableStore.class, &quot;&quot;, new StackTrace(message));</span>
+                        }
+                    }
+<span class="nc" id="L145">                }</span>
+<span class="fc" id="L146">                int delay = Math.min(250, count * count);</span>
+<span class="fc" id="L147">                sleep(delay, MILLISECONDS);</span>
+            }
+<span class="nc" id="L149">        } catch (IOException e) {</span>
+<span class="nc" id="L150">            throw new IllegalStateException(&quot;Couldn't perform operation with &quot; + type + &quot; file lock&quot;, e);</span>
+<span class="nc" id="L151">        }</span>
+<span class="nc" id="L152">        throw new IllegalStateException(&quot;Unable to claim exclusive &quot; + type + &quot; lock on file &quot; + file);</span>
+    }
+
+    @NotNull
+    @Override
+    public File file() {
+<span class="fc" id="L158">        return mappedFile.file();</span>
+    }
+
+    @NotNull
+    @Override
+    public String dump() {
+<span class="fc" id="L164">        return dump(false);</span>
+    }
+
+    private String dump(final boolean abbrev) {
+
+<span class="fc" id="L169">        final MappedBytes bytes = MappedBytes.mappedBytes(mappedFile);</span>
+        try {
+<span class="fc" id="L171">            bytes.readLimit(bytes.realCapacity());</span>
+<span class="fc" id="L172">            return Wires.fromSizePrefixedBlobs(bytes, abbrev);</span>
+        } finally {
+<span class="fc" id="L174">            bytes.releaseLast();</span>
+        }
+    }
+
+    @NotNull
+    @Override
+    public String shortDump() {
+<span class="nc" id="L181">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L183">        return dump(true);</span>
+    }
+
+    @Override
+    protected void performClose() {
+<span class="fc" id="L188">        mappedBytes.releaseLast();</span>
+<span class="fc" id="L189">    }</span>
+
+    /**
+     * @return creates a new instance of mapped bytes, because, for example the tailer and appender can be at different locations.
+     */
+    @NotNull
+    @Override
+    public MappedBytes bytes() {
+<span class="nc" id="L197">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L199">        return MappedBytes.mappedBytes(mappedFile);</span>
+    }
+
+    @NotNull
+    @Override
+    public String toString() {
+<span class="nc" id="L205">        return getClass().getSimpleName() + &quot;{&quot; +</span>
+                &quot;wireType=&quot; + wireType +
+                &quot;, mappedFile=&quot; + mappedFile +
+                '}';
+    }
+
+    // *************************************************************************
+    // Marshalling
+    // *************************************************************************
+
+    private void onCleanup() {
+<span class="nc" id="L216">        mappedBytes.releaseLast();</span>
+<span class="nc" id="L217">    }</span>
+
+    @Override
+    public void writeMarshallable(@NotNull final WireOut wire) {
+
+<span class="fc" id="L222">        wire.write(MetaDataField.wireType).object(wireType);</span>
+
+<span class="fc bfc" id="L224" title="All 2 branches covered.">        if (metadata != Metadata.NoMeta.INSTANCE)</span>
+<span class="fc" id="L225">            wire.write(MetaDataField.metadata).typedMarshallable(this.metadata);</span>
+
+        // align to a word whether needed or not as a micro-optimisation.
+<span class="fc" id="L228">        wire.writeAlignTo(Integer.BYTES, 0);</span>
+<span class="fc" id="L229">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public synchronized LongValue acquireValueFor(CharSequence key, final long defaultValue) { // TODO Change to ThreadLocal values if performance is a problem.
+
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">        if (mappedBytes.isClosed())</span>
+<span class="nc" id="L238">            throw new ClosedIllegalStateException(&quot;Closed&quot;);</span>
+
+<span class="fc" id="L240">        final StringBuilder sb = Wires.acquireStringBuilder();</span>
+<span class="fc" id="L241">        mappedBytes.reserve(this);</span>
+        try {
+<span class="fc" id="L243">            mappedBytes.readPosition(0);</span>
+<span class="fc" id="L244">            mappedBytes.readLimit(mappedBytes.realCapacity());</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">            while (mappedWire.readDataHeader()) {</span>
+<span class="fc" id="L246">                final int header = mappedBytes.readVolatileInt();</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">                if (Wires.isNotComplete(header))</span>
+<span class="nc" id="L248">                    break;</span>
+<span class="fc" id="L249">                final long readPosition = mappedBytes.readPosition();</span>
+<span class="fc" id="L250">                final int length = Wires.lengthOf(header);</span>
+<span class="fc" id="L251">                final ValueIn valueIn = mappedWire.readEventName(sb);</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">                if (StringUtils.equalsCaseIgnore(key, sb)) {</span>
+<span class="fc" id="L253">                    return valueIn.int64ForBinding(null);</span>
+                }
+<span class="fc" id="L255">                mappedBytes.readPosition(readPosition + length);</span>
+<span class="fc" id="L256">            }</span>
+            // not found
+<span class="fc" id="L258">            final int safeLength = Maths.toUInt31(mappedBytes.realCapacity() - mappedBytes.readPosition());</span>
+<span class="fc" id="L259">            mappedBytes.writeLimit(mappedBytes.realCapacity());</span>
+<span class="fc" id="L260">            long start = mappedBytes.readPosition();</span>
+<span class="fc" id="L261">            mappedBytes.writePosition(start);</span>
+<span class="fc" id="L262">            final long pos = mappedWire.enterHeader(safeLength);</span>
+<span class="fc" id="L263">            final LongValue longValue = wireType.newLongReference().get();</span>
+<span class="fc" id="L264">            mappedWire.writeEventName(key).int64forBinding(defaultValue, longValue);</span>
+<span class="fc" id="L265">            mappedWire.writeAlignTo(Integer.BYTES, 0);</span>
+<span class="fc" id="L266">            mappedWire.updateHeader(pos, false, 0);</span>
+<span class="fc" id="L267">            long end = mappedBytes.writePosition();</span>
+<span class="fc" id="L268">            long chuckSize = mappedFile.chunkSize();</span>
+<span class="fc" id="L269">            long overlapSize = mappedFile.overlapSize();</span>
+<span class="fc" id="L270">            long endOfChunk = (start + chuckSize - 1) / chuckSize * chuckSize;</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">            if (end &gt;= endOfChunk + overlapSize)</span>
+<span class="nc" id="L272">                throw new IllegalStateException(&quot;Misaligned write&quot;);</span>
+<span class="fc" id="L273">            return longValue;</span>
+
+<span class="nc" id="L275">        } catch (StreamCorruptedException | EOFException e) {</span>
+<span class="nc" id="L276">            throw new IORuntimeException(e);</span>
+
+        } finally {
+<span class="fc" id="L279">            mappedBytes.release(this);</span>
+        }
+    }
+
+    @Override
+    public synchronized &lt;T&gt; void forEachKey(T accumulator, TableStoreIterator&lt;T&gt; tsIterator) {
+<span class="nc" id="L285">        final StringBuilder sb = Wires.acquireStringBuilder();</span>
+<span class="nc" id="L286">        mappedBytes.reserve(this);</span>
+        try {
+<span class="nc" id="L288">            mappedBytes.readPosition(0);</span>
+<span class="nc" id="L289">            mappedBytes.readLimit(mappedBytes.realCapacity());</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            while (mappedWire.readDataHeader()) {</span>
+<span class="nc" id="L291">                final int header = mappedBytes.readVolatileInt();</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                if (Wires.isNotComplete(header))</span>
+<span class="nc" id="L293">                    break;</span>
+<span class="nc" id="L294">                final long readPosition = mappedBytes.readPosition();</span>
+<span class="nc" id="L295">                final int length = Wires.lengthOf(header);</span>
+<span class="nc" id="L296">                final ValueIn valueIn = mappedWire.readEventName(sb);</span>
+<span class="nc" id="L297">                tsIterator.accept(accumulator, sb, valueIn);</span>
+<span class="nc" id="L298">                mappedBytes.readPosition(readPosition + length);</span>
+<span class="nc" id="L299">            }</span>
+
+<span class="nc" id="L301">        } catch (EOFException e) {</span>
+<span class="nc" id="L302">            throw new IORuntimeException(e);</span>
+
+        } finally {
+<span class="nc" id="L305">            mappedBytes.release(this);</span>
+        }
+<span class="nc" id="L307">    }</span>
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public &lt;R&gt; R doWithExclusiveLock(@NotNull final Function&lt;TableStore&lt;T&gt;, ? extends R&gt; code) {
+<span class="fc" id="L314">        return doWithExclusiveLock(file(), code, () -&gt; this);</span>
+    }
+
+    @Override
+    public T metadata() {
+<span class="fc" id="L319">        return metadata;</span>
+    }
+
+    @Override
+    protected boolean threadSafetyCheck(final boolean isUsed) {
+        // TableStore are thread safe
+<span class="fc" id="L325">        return true;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

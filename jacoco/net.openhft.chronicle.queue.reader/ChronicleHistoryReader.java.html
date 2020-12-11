@@ -1,0 +1,272 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ChronicleHistoryReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.reader</a> &gt; <span class="el_source">ChronicleHistoryReader.java</span></div><h1>ChronicleHistoryReader.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.reader;
+
+import net.openhft.chronicle.bytes.MethodReader;
+import net.openhft.chronicle.core.util.Histogram;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.queue.util.ToolsUtil;
+import net.openhft.chronicle.wire.MessageHistory;
+import net.openhft.chronicle.wire.VanillaMessageHistory;
+import net.openhft.chronicle.wire.VanillaMethodReader;
+import net.openhft.chronicle.wire.WireParselet;
+import org.jetbrains.annotations.NotNull;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+
+@Deprecated /* For removal in x.22, Use HistoryReader.create instead */
+<span class="nc" id="L24">public class ChronicleHistoryReader implements HistoryReader {</span>
+
+    // Because the class is not final and contains protected methods
+    // we cannot provide a delegator. So, this class remains as it is
+    // and will be removed in 5.22
+
+    private static final int SUMMARY_OUTPUT_UNSET = -999;
+    protected Path basePath;
+    protected Consumer&lt;String&gt; messageSink;
+<span class="nc" id="L33">    protected boolean progress = false;</span>
+<span class="nc" id="L34">    protected TimeUnit timeUnit = TimeUnit.NANOSECONDS;</span>
+<span class="nc" id="L35">    protected boolean histosByMethod = false;</span>
+<span class="nc" id="L36">    protected Map&lt;String, Histogram&gt; histos = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L37">    protected long ignore = 0;</span>
+<span class="nc" id="L38">    protected long counter = 0;</span>
+<span class="nc" id="L39">    protected long measurementWindowNanos = 0;</span>
+<span class="nc" id="L40">    protected long firstTimeStampNanos = 0;</span>
+<span class="nc" id="L41">    protected long lastWindowCount = 0;</span>
+<span class="nc" id="L42">    protected int summaryOutputOffset = SUMMARY_OUTPUT_UNSET;</span>
+<span class="nc" id="L43">    protected int lastHistosSize = 0;</span>
+
+    static {
+<span class="nc" id="L46">        ToolsUtil.warnIfResourceTracing();</span>
+<span class="nc" id="L47">    }</span>
+
+    @Override
+    public ChronicleHistoryReader withMessageSink(final Consumer&lt;String&gt; messageSink) {
+<span class="nc" id="L51">        this.messageSink = messageSink;</span>
+<span class="nc" id="L52">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withBasePath(final Path path) {
+<span class="nc" id="L57">        this.basePath = path;</span>
+<span class="nc" id="L58">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withProgress(boolean p) {
+<span class="nc" id="L63">        this.progress = p;</span>
+<span class="nc" id="L64">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withTimeUnit(TimeUnit p) {
+<span class="nc" id="L69">        this.timeUnit = p;</span>
+<span class="nc" id="L70">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withHistosByMethod(boolean b) {
+<span class="nc" id="L75">        this.histosByMethod = b;</span>
+<span class="nc" id="L76">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withIgnore(long ignore) {
+<span class="nc" id="L81">        this.ignore = ignore;</span>
+<span class="nc" id="L82">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withMeasurementWindow(long measurementWindow) {
+<span class="nc" id="L87">        this.measurementWindowNanos = timeUnit.toNanos(measurementWindow);</span>
+<span class="nc" id="L88">        return this;</span>
+    }
+
+    @Override
+    public ChronicleHistoryReader withSummaryOutput(int offset) {
+<span class="nc" id="L93">        this.summaryOutputOffset = offset;</span>
+<span class="nc" id="L94">        return this;</span>
+    }
+
+    @NotNull
+    protected ChronicleQueue createQueue() {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (!Files.exists(basePath)) {</span>
+<span class="nc" id="L100">            throw new IllegalArgumentException(String.format(&quot;Path %s does not exist&quot;, basePath));</span>
+        }
+<span class="nc" id="L102">        return SingleChronicleQueueBuilder</span>
+<span class="nc" id="L103">                .binary(basePath.toFile())</span>
+<span class="nc" id="L104">                .readOnly(true)</span>
+<span class="nc" id="L105">                .build();</span>
+    }
+
+    @Override
+    public void execute() {
+<span class="nc" id="L110">        readChronicle();</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (measurementWindowNanos == 0)</span>
+<span class="nc" id="L112">            outputData();</span>
+<span class="nc" id="L113">    }</span>
+
+    @Override
+    public Map&lt;String, Histogram&gt; readChronicle() {
+<span class="nc" id="L117">        try (final ChronicleQueue q = createQueue()) {</span>
+<span class="nc" id="L118">            final ExcerptTailer tailer = q.createTailer();</span>
+<span class="nc" id="L119">            final WireParselet parselet = parselet();</span>
+<span class="nc" id="L120">            MessageHistory.set(new VanillaMessageHistory());</span>
+<span class="nc" id="L121">            try (final MethodReader mr = new VanillaMethodReader(tailer, true, parselet, null, parselet)) {</span>
+
+<span class="nc bnc" id="L123" title="All 4 branches missed.">                while (!Thread.currentThread().isInterrupted() &amp;&amp; mr.readOne()) {</span>
+<span class="nc" id="L124">                    ++counter;</span>
+<span class="nc bnc" id="L125" title="All 4 branches missed.">                    if (this.progress &amp;&amp; counter % 1_000_000L == 0) {</span>
+<span class="nc" id="L126">                        System.out.println(&quot;Progress: &quot; + counter);</span>
+                    }
+                }
+            }
+        }
+
+<span class="nc" id="L132">        return histos;</span>
+    }
+
+    @Override
+    public void outputData() {
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (summaryOutputOffset != SUMMARY_OUTPUT_UNSET)</span>
+<span class="nc" id="L138">            printSummary();</span>
+        else
+<span class="nc" id="L140">            printPercentilesSummary();</span>
+<span class="nc" id="L141">    }</span>
+
+    private void printPercentilesSummary() {
+        // we should also consider the case where &gt;1 output messages are from 1 incoming
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (histos.size() == 0) {</span>
+<span class="nc" id="L147">            messageSink.accept(&quot;No data&quot;);</span>
+<span class="nc" id="L148">            return;</span>
+        }
+<span class="nc" id="L150">        int counter = 0;</span>
+<span class="nc" id="L151">        messageSink.accept(&quot;Timings below in &quot; + timeUnit.name());</span>
+<span class="nc" id="L152">        final StringBuilder sb = new StringBuilder(&quot;sourceId        &quot;);</span>
+<span class="nc" id="L153">        histos.forEach((id, histogram) -&gt; sb.append(String.format(&quot;%12s &quot;, id)));</span>
+<span class="nc" id="L154">        messageSink.accept(sb.toString());</span>
+<span class="nc" id="L155">        messageSink.accept(&quot;count:  &quot; + count());</span>
+<span class="nc" id="L156">        messageSink.accept(&quot;50:     &quot; + percentiles(counter++));</span>
+<span class="nc" id="L157">        messageSink.accept(&quot;90:     &quot; + percentiles(counter++));</span>
+<span class="nc" id="L158">        messageSink.accept(&quot;99:     &quot; + percentiles(counter++));</span>
+<span class="nc" id="L159">        messageSink.accept(&quot;99.9:   &quot; + percentiles(counter++));</span>
+<span class="nc" id="L160">        messageSink.accept(&quot;99.99:  &quot; + percentiles(counter++));</span>
+<span class="nc" id="L161">        messageSink.accept(&quot;99.999: &quot; + percentiles(counter++));</span>
+<span class="nc" id="L162">        messageSink.accept(&quot;99.9999:&quot; + percentiles(counter++));</span>
+<span class="nc" id="L163">        messageSink.accept(&quot;worst:  &quot; + percentiles(-1));</span>
+<span class="nc" id="L164">    }</span>
+
+    private void printSummary() {
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (histos.size() &gt; lastHistosSize) {</span>
+<span class="nc" id="L168">            messageSink.accept(&quot;relative_ts,&quot; + String.join(&quot;,&quot;, histos.keySet()));</span>
+<span class="nc" id="L169">            lastHistosSize = histos.size();</span>
+        }
+<span class="nc" id="L171">        long tsSinceStart = (lastWindowCount * measurementWindowNanos) - firstTimeStampNanos;</span>
+<span class="nc" id="L172">        messageSink.accept(</span>
+<span class="nc" id="L173">                timeUnit.convert(tsSinceStart, TimeUnit.NANOSECONDS) + &quot;,&quot; +</span>
+<span class="nc" id="L174">                        histos.values().stream().</span>
+<span class="nc" id="L175">                                map(h -&gt; Long.toString(timeUnit.convert((long) offset(h.getPercentiles(), summaryOutputOffset), TimeUnit.NANOSECONDS))).</span>
+<span class="nc" id="L176">                                collect(Collectors.joining(&quot;,&quot;)));</span>
+<span class="nc" id="L177">    }</span>
+
+    private double offset(double[] percentiles, int offset) {
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        return offset &gt;= 0 ? percentiles[offset] : percentiles[percentiles.length + offset];</span>
+    }
+
+    private String count() {
+<span class="nc" id="L184">        final StringBuilder sb = new StringBuilder(&quot;        &quot;);</span>
+<span class="nc" id="L185">        histos.forEach((id, histogram) -&gt; sb.append(String.format(&quot;%12d &quot;, histogram.totalCount())));</span>
+<span class="nc" id="L186">        return sb.toString();</span>
+    }
+
+    private String percentiles(final int index) {
+<span class="nc" id="L190">        final StringBuilder sb = new StringBuilder(&quot;        &quot;);</span>
+<span class="nc" id="L191">        histos.forEach((id, histogram) -&gt; {</span>
+<span class="nc" id="L192">            double[] percentiles = histogram.getPercentiles();</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (index &gt;= percentiles.length - 1) {</span>
+<span class="nc" id="L194">                sb.append(String.format(&quot;%12s &quot;, &quot; &quot;));</span>
+<span class="nc" id="L195">                return;</span>
+            }
+<span class="nc" id="L197">            int myIndex = index;</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">            if (myIndex == -1) myIndex = percentiles.length - 1;</span>
+<span class="nc" id="L199">            double value = percentiles[myIndex];</span>
+<span class="nc" id="L200">            sb.append(String.format(&quot;%12d &quot;, timeUnit.convert((long) value, TimeUnit.NANOSECONDS)));</span>
+<span class="nc" id="L201">        });</span>
+<span class="nc" id="L202">        return sb.toString();</span>
+    }
+
+    protected WireParselet parselet() {
+<span class="nc" id="L206">        return (methodName, v) -&gt; {</span>
+<span class="nc" id="L207">            v.skipValue();</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (counter &lt; ignore)</span>
+<span class="nc" id="L209">                return;</span>
+<span class="nc" id="L210">            final MessageHistory history = MessageHistory.get();</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            if (history == null)</span>
+<span class="nc" id="L212">                return;</span>
+
+<span class="nc" id="L214">            processMessage(methodName, history);</span>
+
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (history.timings() &gt; 0) {</span>
+<span class="nc" id="L217">                long firstTiming = history.timing(0);</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                if (measurementWindowNanos &gt; 0) {</span>
+<span class="nc" id="L219">                    long windowCount = firstTiming / measurementWindowNanos;</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                    if (windowCount &gt; lastWindowCount) {</span>
+<span class="nc" id="L221">                        windowPassed();</span>
+<span class="nc" id="L222">                        lastWindowCount = windowCount;</span>
+                    }
+<span class="nc bnc" id="L224" title="All 2 branches missed.">                    if (firstTimeStampNanos == 0)</span>
+<span class="nc" id="L225">                        firstTimeStampNanos = firstTiming;</span>
+                }
+            }
+<span class="nc" id="L228">        };</span>
+    }
+
+    protected void processMessage(CharSequence methodName, MessageHistory history) {
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        CharSequence extraHistoId = histosByMethod ? (&quot;_&quot; + methodName) : &quot;&quot;;</span>
+<span class="nc" id="L233">        long lastTime = 0;</span>
+        // if the tailer has recordHistory(true) then the MessageHistory will be
+        // written with a single timing and nothing else. This is then carried through
+<span class="nc" id="L236">        int firstWriteOffset = history.timings() - (history.sources() * 2);</span>
+<span class="nc bnc" id="L237" title="All 4 branches missed.">        if (!(firstWriteOffset == 0 || firstWriteOffset == 1))</span>
+            // don't know how this can happen, but there is at least one CQ that exhibits it
+<span class="nc" id="L239">            return;</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        for (int sourceIndex = 0; sourceIndex &lt; history.sources(); sourceIndex++) {</span>
+<span class="nc" id="L241">            String histoId = Integer.toString(history.sourceId(sourceIndex)) + extraHistoId;</span>
+<span class="nc" id="L242">            Histogram histo = histos.computeIfAbsent(histoId, s -&gt; histogram());</span>
+<span class="nc" id="L243">            long receivedByThisComponent = history.timing((2 * sourceIndex) + firstWriteOffset);</span>
+<span class="nc" id="L244">            long processedByThisComponent = history.timing((2 * sourceIndex) + firstWriteOffset + 1);</span>
+<span class="nc" id="L245">            histo.sample((double) (processedByThisComponent - receivedByThisComponent));</span>
+<span class="nc bnc" id="L246" title="All 4 branches missed.">            if (lastTime == 0 &amp;&amp; firstWriteOffset &gt; 0) {</span>
+<span class="nc" id="L247">                Histogram histo1 = histos.computeIfAbsent(&quot;startTo&quot; + histoId, s -&gt; histogram());</span>
+<span class="nc" id="L248">                histo1.sample((double) (receivedByThisComponent - history.timing(0)));</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">            } else if (lastTime != 0) {</span>
+<span class="nc" id="L250">                Histogram histo1 = histos.computeIfAbsent(history.sourceId(sourceIndex - 1) + &quot;to&quot; + histoId, s -&gt; histogram());</span>
+                // here we are comparing System.nanoTime across processes. YMMV
+<span class="nc" id="L252">                histo1.sample((double) (receivedByThisComponent - lastTime));</span>
+            }
+<span class="nc" id="L254">            lastTime = processedByThisComponent;</span>
+        }
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (history.sources() &gt; 1) {</span>
+<span class="nc" id="L257">            Histogram histoE2E = histos.computeIfAbsent(&quot;endToEnd&quot;, s -&gt; histogram());</span>
+<span class="nc" id="L258">            histoE2E.sample((double) (history.timing(history.timings() - 1) - history.timing(0)));</span>
+        }
+<span class="nc" id="L260">    }</span>
+
+    protected void windowPassed() {
+<span class="nc" id="L263">        outputData();</span>
+<span class="nc" id="L264">        histos.values().forEach(Histogram::reset);</span>
+<span class="nc" id="L265">    }</span>
+
+    @NotNull
+    protected Histogram histogram() {
+<span class="nc" id="L269">        return new Histogram(60, 4);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EventLoopServiceWrapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.service</a> &gt; <span class="el_source">EventLoopServiceWrapper.java</span></div><h1>EventLoopServiceWrapper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ *  you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package net.openhft.chronicle.queue.service;
+
+import net.openhft.chronicle.bytes.MethodReader;
+import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.threads.EventHandler;
+import net.openhft.chronicle.core.threads.EventLoop;
+import net.openhft.chronicle.core.threads.HandlerPriority;
+import net.openhft.chronicle.core.threads.InvalidEventHandlerException;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
+
+@Deprecated /* For removal in x.22. This is now an internal concern. */
+public class EventLoopServiceWrapper&lt;O&gt; implements ServiceWrapper, EventHandler {
+    @NotNull
+    protected final MethodReader[] serviceIn;
+    private final HandlerPriority priority;
+    @NotNull
+    private final ChronicleQueue[] inputQueues;
+    @NotNull
+    private final ChronicleQueue outputQueue;
+    @NotNull
+    private final O serviceOut;
+    private final boolean createdEventLoop;
+    private final Object[] serviceImpl;
+<span class="nc" id="L45">    private volatile boolean closed = false;</span>
+    @Nullable
+    private EventLoop eventLoop;
+
+<span class="nc" id="L49">    public EventLoopServiceWrapper(@NotNull ServiceWrapperBuilder&lt;O&gt; builder) {</span>
+<span class="nc" id="L50">        this.priority = builder.priority();</span>
+<span class="nc" id="L51">        outputQueue = ChronicleQueue.singleBuilder(builder.outputPath())</span>
+<span class="nc" id="L52">                .sourceId(builder.outputSourceId())</span>
+<span class="nc" id="L53">                .checkInterrupts(false)</span>
+<span class="nc" id="L54">                .build();</span>
+<span class="nc" id="L55">        serviceOut = outputQueue.acquireAppender()</span>
+<span class="nc" id="L56">                .methodWriterBuilder(builder.outClass())</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">                .recordHistory(builder.outputSourceId() != 0)</span>
+<span class="nc" id="L58">                .get();</span>
+<span class="nc" id="L59">        serviceImpl = builder.getServiceFunctions().stream()</span>
+<span class="nc" id="L60">                .map(f -&gt; f.apply(serviceOut))</span>
+<span class="nc" id="L61">                .toArray();</span>
+
+<span class="nc" id="L63">        List&lt;String&gt; paths = builder.inputPath();</span>
+<span class="nc" id="L64">        serviceIn = new MethodReader[paths.size()];</span>
+<span class="nc" id="L65">        inputQueues = new ChronicleQueue[paths.size()];</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        for (int i = 0; i &lt; paths.size(); i++) {</span>
+<span class="nc" id="L67">            inputQueues[i] = ChronicleQueue.singleBuilder(paths.get(i))</span>
+<span class="nc" id="L68">                    .sourceId(builder.inputSourceId())</span>
+<span class="nc" id="L69">                    .build();</span>
+<span class="nc" id="L70">            serviceIn[i] = inputQueues[i].createTailer()</span>
+<span class="nc" id="L71">                    .afterLastWritten(outputQueue)</span>
+<span class="nc" id="L72">                    .methodReader(serviceImpl);</span>
+        }
+<span class="nc" id="L74">        eventLoop = builder.eventLoop();</span>
+<span class="nc" id="L75">        eventLoop.addHandler(this);</span>
+<span class="nc" id="L76">        createdEventLoop = builder.createdEventLoop();</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        if (createdEventLoop)</span>
+<span class="nc" id="L78">            eventLoop.start();</span>
+<span class="nc" id="L79">    }</span>
+
+    @NotNull
+    @Override
+    public ChronicleQueue[] inputQueues() {
+<span class="nc" id="L84">        return inputQueues;</span>
+    }
+
+    @NotNull
+    @Override
+    public ChronicleQueue outputQueue() {
+<span class="nc" id="L90">        return outputQueue;</span>
+    }
+
+    @Override
+    public boolean action() throws InvalidEventHandlerException {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (isClosed()) {</span>
+<span class="nc" id="L96">            Closeable.closeQuietly(serviceImpl);</span>
+<span class="nc" id="L97">            Closeable.closeQuietly(serviceIn);</span>
+<span class="nc" id="L98">            Closeable.closeQuietly(outputQueue);</span>
+<span class="nc" id="L99">            Closeable.closeQuietly(inputQueues);</span>
+<span class="nc" id="L100">            throw new InvalidEventHandlerException();</span>
+        }
+
+<span class="nc" id="L103">        boolean busy = false;</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">        for (MethodReader reader : serviceIn) {</span>
+<span class="nc" id="L105">            busy |= reader.readOne();</span>
+        }
+<span class="nc" id="L107">        return busy;</span>
+    }
+
+    @NotNull
+    @Override
+    public HandlerPriority priority() {
+<span class="nc" id="L113">        return priority;</span>
+    }
+
+    @Override
+    public void close() {
+<span class="nc" id="L118">        closed = true;</span>
+<span class="nc" id="L119">        EventLoop eventLoop = this.eventLoop;</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        if (eventLoop != null) {</span>
+<span class="nc" id="L121">            eventLoop.unpause();</span>
+        }
+<span class="nc" id="L123">        this.eventLoop = null;</span>
+<span class="nc bnc" id="L124" title="All 4 branches missed.">        if (createdEventLoop &amp;&amp; eventLoop != null) {</span>
+<span class="nc" id="L125">            eventLoop.close();</span>
+        }
+<span class="nc" id="L127">    }</span>
+
+    @Override
+    public boolean isClosed() {
+<span class="nc" id="L131">        return closed;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

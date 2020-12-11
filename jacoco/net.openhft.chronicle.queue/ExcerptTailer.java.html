@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExcerptTailer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue</a> &gt; <span class="el_source">ExcerptTailer.java</span></div><h1>ExcerptTailer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue;
+
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.wire.DocumentContext;
+import net.openhft.chronicle.wire.MarshallableIn;
+import net.openhft.chronicle.wire.ReadMarshallable;
+import net.openhft.chronicle.wire.SourceContext;
+import org.jetbrains.annotations.NotNull;
+
+/**
+ * The component that facilitates sequentially reading data from a {@link ChronicleQueue}.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Tailers are NOT thread-safe, sharing a Tailer between threads will lead to errors and unpredictable behaviour.&lt;/p&gt;
+ */
+public interface ExcerptTailer extends ExcerptCommon&lt;ExcerptTailer&gt;, MarshallableIn, SourceContext {
+
+    /**
+     * Returns the {@link DocumentContext } for this ExcerptTailer.
+     * &lt;p&gt;
+     * This is equivalent to {@link  ExcerptTailer#readDocument(ReadMarshallable)} but without the use of a
+     * lambda expression.
+     * &lt;p&gt;
+     * This method is the ExcerptTailer equivalent of {@link net.openhft.chronicle.wire.WireIn#readingDocument()}
+     *
+     * @return the document context
+     */
+    @Override
+    @NotNull
+    default DocumentContext readingDocument() {
+<span class="nc" id="L47">        return readingDocument(false);</span>
+    }
+
+/**
+     * Returns the {@link DocumentContext } for this ExcerptTailer.
+     * &lt;p&gt;
+     * This is equivalent to {@link  ExcerptTailer#readDocument(ReadMarshallable)} but without the use of a
+     * lambda expression.
+     * &lt;p&gt;
+     * This method is the ExcerptTailer equivalent of {@link net.openhft.chronicle.wire.WireIn#readingDocument()}
+     *
+     * @param includeMetaData if the DocumentContext shall be meta data aware.
+     *
+     * @return the document context
+     */
+    @NotNull
+    DocumentContext readingDocument(boolean includeMetaData);
+
+    /**
+     * Returns {@code true} if {@link #readingDocument()} would return a document which is present, in other words would return a DocumentContext where {@link net.openhft.chronicle.wire.DocumentContext#isPresent()} == {@code true}
+     *
+     * For the best performance you should only use this method once a message has been found by toStart() or readingDocument(). Otherwise {@link #readingDocument()} is called and then rolled back, which is not optimal.
+     * For the same reason, this method should also be avoided when reading documents backwards.
+     *
+     * @return if {@link #readingDocument()} would return a DocumentContext
+     *         that provides excerpts to read.
+     */
+    default boolean peekDocument() {
+<span class="nc" id="L75">        return true;</span>
+    }
+
+    /**
+     * Returns the current index of this Trailer.
+     * &lt;p&gt;
+     * If this method is invoked within a {@code try (tailer.readingDocument){ }} block, returns the index of
+     * the current reading document. Otherwise, returns the next index to read.
+     * &lt;p&gt;
+     * The index includes the cycle and the sequence number within that cycle.
+     *
+     * @return the current index of this Trailer
+     *
+     */
+    @Override
+    long index();
+
+    /**
+     * Returns the current cycle for this Trailer.
+     * &lt;p&gt;
+     * Usually, each cycle will have its own unique data file to store excerpts.
+     *
+     * @return Returns the current cycle for this Trailer
+     */
+    int cycle();
+
+    /**
+     * Tries to move the index for this Trailer to the provided {@code index}.
+     * &lt;p&gt;
+     * The index contains both the cycle number and sequence number within the cycle.
+     * &lt;p&gt;
+     * In order for the operation to succeed, the roll file, corresponding to
+     * the cycle number in the index, must be present and the roll file must
+     * contain the sequence number contained in the index.
+     * &lt;p&gt;
+     * If the index is not a valid index, the operation is undefined.
+     *
+     * @param index index to move to.
+     * @return if this is a valid index.
+     */
+    boolean moveToIndex(long index);
+
+    /**
+     * Moves the index for this Trailer to the first existing excerpt in the queue.
+     *
+     * @return this ExcerptTrailer
+     */
+    @NotNull
+    ExcerptTailer toStart();
+
+    /**
+     * Moves the index for this Trailer to the end of the queue.
+     * &lt;p&gt;
+     * If the direction() == FORWARD, this will be the index position corresponding to one more
+     * than the last entry. Otherwise, the index will be the last excerpt.
+     * &lt;p&gt;
+     * This is not atomic with the appenders, in other words if a cycle has been added in the
+     * current millisecond, toEnd() may not see it, This is because for performance reasons, the
+     * queue.lastCycle() is cached, as finding the last cycle is expensive, it requires asking the
+     * directory for the Files.list() so, this cache is only refreshed if the call toEnd() is in a
+     * new millisecond. Hence a whole milliseconds with of data could be added to the
+     * chronicle-queue that toEnd() won’t see. For appenders that that are using the same queue
+     * instance ( and with then same JVM ), they can be informed that the last cycle has
+     * changed, this will yield better results, but atomicity can still not be guaranteed.
+     *
+     * @return this ExcerptTailer
+     */
+    @NotNull
+    ExcerptTailer toEnd();
+
+    /**
+     * Sets the {@code striding} property of this Trailer.
+     * &lt;p&gt;
+     * When striding is enabled AND direction is BACKWARD, skip to the entries easiest to find, doesn't need to be every entry.
+     *
+     * @param striding skip to the indexStride if that is easy, doesn't always happen.
+     *
+     * @return this ExcerptTailer
+     */
+    ExcerptTailer striding(boolean striding);
+
+    /**
+     * Returns the striding property of this Trailer.
+     *
+     * @return the striding property of this Trailer
+     * @see #striding(boolean)
+     */
+    boolean striding();
+
+    /**
+     * Sets the direction of this ExcerptTailer.
+     * &lt;p&gt;
+     * The direction determines the direction of movement upon reading an excerpt.
+     *
+     * @param direction which is either of NONE, FORWARD, BACKWARD
+
+     * @return this ExcerptTrailer
+     * @throws NullPointerException if the provide {@code direction} is {@code null}
+     */
+    @NotNull
+    ExcerptTailer direction(@NotNull TailerDirection direction);
+
+    /**
+     * Returns the direction of this ExcerptTailer.
+     * &lt;p&gt;
+     * The direction determines the direction of movement upon reading an excerpt.
+     *
+     * @return the direction of this ExcerptTailer
+     */
+    TailerDirection direction();
+
+    /**
+     * Winds this ExcerptTailer to after the last entry which wrote an entry to the queue.
+     *
+     * @param queue which was written to.
+     * @return this ExcerptTailer
+     *
+     * @throws IORuntimeException if the provided {@code queue} couldn't be wound to the last index.
+     * @throws NullPointerException if the provided {@code queue} is {@code null}
+     */
+    @NotNull
+    ExcerptTailer afterLastWritten(ChronicleQueue queue) throws IORuntimeException;
+
+    /**
+     * Sets the Read After Replica Acknowledged property of this Trailer to the
+     * provided {@code readAfterReplicaAcknowledged}.
+     * &lt;p&gt;
+     * Enterprise Queue only: if replication enabled, setting this to true on a source queue ensures that
+     * this tailer will not read until at least one of the sinks has acknowledged receipt of the excerpt.
+     * This will block forever if no sinks acknowledge receipt.
+     *
+     * @param readAfterReplicaAcknowledged enable
+     */
+    default void readAfterReplicaAcknowledged(boolean readAfterReplicaAcknowledged) {
+<span class="nc" id="L209">    }</span>
+
+    /**
+     * Returns the Read After Replica Acknowledged property of this Trailer.
+     * &lt;p&gt;
+     * Enterprise Queue only: if replication enabled, setting this to true on a source queue ensures that
+     * this tailer will not read until at least one of the sinks has acknowledged receipt of the excerpt.
+     * This will block forever if no sinks acknowledge receipt.
+     *
+     * @return the Read After Replica Acknowledged property of this Trailer
+     */
+    default boolean readAfterReplicaAcknowledged() {
+<span class="nc" id="L221">        return false;</span>
+    }
+
+    /**
+     * Returns the {@link TailerState} of this Trailer.
+     *
+     * @return the {@link TailerState} of this Trailer
+     */
+    @NotNull
+    TailerState state();
+
+    // Need to add this here until we can release Ring. https://github.com/ChronicleEnterprise/Chronicle-Ring/issues/12
+    @Override
+    default ExcerptTailer disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
+<span class="nc" id="L235">        return this;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

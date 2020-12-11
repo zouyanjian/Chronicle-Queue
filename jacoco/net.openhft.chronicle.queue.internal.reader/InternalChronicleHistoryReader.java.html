@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InternalChronicleHistoryReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.internal.reader</a> &gt; <span class="el_source">InternalChronicleHistoryReader.java</span></div><h1>InternalChronicleHistoryReader.java</h1><pre class="source lang-java linenums">package net.openhft.chronicle.queue.internal.reader;
+
+import net.openhft.chronicle.bytes.MethodReader;
+import net.openhft.chronicle.core.util.Histogram;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.queue.reader.HistoryReader;
+import net.openhft.chronicle.queue.util.ToolsUtil;
+import net.openhft.chronicle.wire.MessageHistory;
+import net.openhft.chronicle.wire.VanillaMessageHistory;
+import net.openhft.chronicle.wire.VanillaMethodReader;
+import net.openhft.chronicle.wire.WireParselet;
+import org.jetbrains.annotations.NotNull;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static net.openhft.chronicle.core.util.ObjectUtils.requireNonNull;
+
+public final class InternalChronicleHistoryReader implements HistoryReader {
+
+    private static final int SUMMARY_OUTPUT_UNSET = -999;
+
+    static {
+<span class="fc" id="L32">        ToolsUtil.warnIfResourceTracing();</span>
+<span class="fc" id="L33">    }</span>
+
+    private final Supplier&lt;? extends ChronicleQueue&gt; queueSupplier;
+
+    private Path basePath;
+    private Consumer&lt;String&gt; messageSink;
+<span class="pc" id="L39">    private boolean progress = false;</span>
+<span class="pc" id="L40">    private TimeUnit timeUnit = TimeUnit.NANOSECONDS;</span>
+<span class="pc" id="L41">    private boolean histosByMethod = false;</span>
+<span class="pc" id="L42">    private Map&lt;String, Histogram&gt; histos = new LinkedHashMap&lt;&gt;();</span>
+<span class="pc" id="L43">    private long ignore = 0;</span>
+<span class="pc" id="L44">    private long counter = 0;</span>
+<span class="pc" id="L45">    private long measurementWindowNanos = 0;</span>
+<span class="pc" id="L46">    private long firstTimeStampNanos = 0;</span>
+<span class="pc" id="L47">    private long lastWindowCount = 0;</span>
+<span class="pc" id="L48">    private int summaryOutputOffset = SUMMARY_OUTPUT_UNSET;</span>
+<span class="pc" id="L49">    private int lastHistosSize = 0;</span>
+
+<span class="fc" id="L51">    public InternalChronicleHistoryReader() {</span>
+<span class="fc" id="L52">        this.queueSupplier = null;</span>
+<span class="fc" id="L53">    }</span>
+
+<span class="nc" id="L55">    public InternalChronicleHistoryReader(@NotNull final Supplier&lt;? extends ChronicleQueue&gt; queueSupplier) {</span>
+<span class="nc" id="L56">        this.queueSupplier = requireNonNull(queueSupplier);</span>
+<span class="nc" id="L57">    }</span>
+
+    public InternalChronicleHistoryReader withMessageSink(final Consumer&lt;String&gt; messageSink) {
+<span class="fc" id="L60">        this.messageSink = messageSink;</span>
+<span class="fc" id="L61">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withBasePath(final Path path) {
+<span class="fc" id="L65">        this.basePath = path;</span>
+<span class="fc" id="L66">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withProgress(boolean p) {
+<span class="nc" id="L70">        this.progress = p;</span>
+<span class="nc" id="L71">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withTimeUnit(TimeUnit p) {
+<span class="fc" id="L75">        this.timeUnit = p;</span>
+<span class="fc" id="L76">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withHistosByMethod(boolean b) {
+<span class="nc" id="L80">        this.histosByMethod = b;</span>
+<span class="nc" id="L81">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withIgnore(long ignore) {
+<span class="nc" id="L85">        this.ignore = ignore;</span>
+<span class="nc" id="L86">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withMeasurementWindow(long measurementWindow) {
+<span class="nc" id="L90">        this.measurementWindowNanos = timeUnit.toNanos(measurementWindow);</span>
+<span class="nc" id="L91">        return this;</span>
+    }
+
+    public InternalChronicleHistoryReader withSummaryOutput(int offset) {
+<span class="nc" id="L95">        this.summaryOutputOffset = offset;</span>
+<span class="nc" id="L96">        return this;</span>
+    }
+
+    @NotNull
+    private ChronicleQueue createQueue() {
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">        if (queueSupplier != null)</span>
+<span class="nc" id="L102">            return queueSupplier.get();</span>
+
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">        if (!Files.exists(basePath))</span>
+<span class="nc" id="L105">            throw new IllegalArgumentException(String.format(&quot;Path %s does not exist&quot;, basePath));</span>
+
+<span class="fc" id="L107">        return SingleChronicleQueueBuilder</span>
+<span class="fc" id="L108">                .binary(basePath.toFile())</span>
+<span class="fc" id="L109">                .readOnly(true)</span>
+<span class="fc" id="L110">                .build();</span>
+    }
+
+    public void execute() {
+<span class="nc" id="L114">        readChronicle();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (measurementWindowNanos == 0)</span>
+<span class="nc" id="L116">            outputData();</span>
+<span class="nc" id="L117">    }</span>
+
+    public Map&lt;String, Histogram&gt; readChronicle() {
+<span class="fc" id="L120">        try (final ChronicleQueue q = createQueue()) {</span>
+<span class="fc" id="L121">            final ExcerptTailer tailer = q.createTailer();</span>
+<span class="fc" id="L122">            final WireParselet parselet = parselet();</span>
+<span class="fc" id="L123">            MessageHistory.set(new VanillaMessageHistory());</span>
+<span class="fc" id="L124">            try (final MethodReader mr = new VanillaMethodReader(tailer, true, parselet, null, parselet)) {</span>
+
+<span class="pc bpc" id="L126" title="1 of 4 branches missed.">                while (!Thread.currentThread().isInterrupted() &amp;&amp; mr.readOne()) {</span>
+<span class="fc" id="L127">                    ++counter;</span>
+<span class="pc bpc" id="L128" title="3 of 4 branches missed.">                    if (this.progress &amp;&amp; counter % 1_000_000L == 0) {</span>
+<span class="nc" id="L129">                        System.out.println(&quot;Progress: &quot; + counter);</span>
+                    }
+                }
+            }
+        }
+
+<span class="fc" id="L135">        return histos;</span>
+    }
+
+    public void outputData() {
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">        if (summaryOutputOffset != SUMMARY_OUTPUT_UNSET)</span>
+<span class="nc" id="L140">            printSummary();</span>
+        else
+<span class="fc" id="L142">            printPercentilesSummary();</span>
+<span class="fc" id="L143">    }</span>
+
+    private void printPercentilesSummary() {
+        // we should also consider the case where &gt;1 output messages are from 1 incoming
+
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">        if (histos.size() == 0) {</span>
+<span class="nc" id="L149">            messageSink.accept(&quot;No data&quot;);</span>
+<span class="nc" id="L150">            return;</span>
+        }
+<span class="fc" id="L152">        int counter = 0;</span>
+<span class="fc" id="L153">        messageSink.accept(&quot;Timings below in &quot; + timeUnit.name());</span>
+<span class="fc" id="L154">        final StringBuilder sb = new StringBuilder(&quot;sourceId        &quot;);</span>
+<span class="fc" id="L155">        histos.forEach((id, histogram) -&gt; sb.append(String.format(&quot;%12s &quot;, id)));</span>
+<span class="fc" id="L156">        messageSink.accept(sb.toString());</span>
+<span class="fc" id="L157">        messageSink.accept(&quot;count:  &quot; + count());</span>
+<span class="fc" id="L158">        messageSink.accept(&quot;50:     &quot; + percentiles(counter++));</span>
+<span class="fc" id="L159">        messageSink.accept(&quot;90:     &quot; + percentiles(counter++));</span>
+<span class="fc" id="L160">        messageSink.accept(&quot;99:     &quot; + percentiles(counter++));</span>
+<span class="fc" id="L161">        messageSink.accept(&quot;99.9:   &quot; + percentiles(counter++));</span>
+<span class="fc" id="L162">        messageSink.accept(&quot;99.99:  &quot; + percentiles(counter++));</span>
+<span class="fc" id="L163">        messageSink.accept(&quot;99.999: &quot; + percentiles(counter++));</span>
+<span class="fc" id="L164">        messageSink.accept(&quot;99.9999:&quot; + percentiles(counter++));</span>
+<span class="fc" id="L165">        messageSink.accept(&quot;worst:  &quot; + percentiles(-1));</span>
+<span class="fc" id="L166">    }</span>
+
+    private void printSummary() {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (histos.size() &gt; lastHistosSize) {</span>
+<span class="nc" id="L170">            messageSink.accept(&quot;relative_ts,&quot; + String.join(&quot;,&quot;, histos.keySet()));</span>
+<span class="nc" id="L171">            lastHistosSize = histos.size();</span>
+        }
+<span class="nc" id="L173">        long tsSinceStart = (lastWindowCount * measurementWindowNanos) - firstTimeStampNanos;</span>
+<span class="nc" id="L174">        messageSink.accept(</span>
+<span class="nc" id="L175">                timeUnit.convert(tsSinceStart, TimeUnit.NANOSECONDS) + &quot;,&quot; +</span>
+<span class="nc" id="L176">                        histos.values().stream().</span>
+<span class="nc" id="L177">                                map(h -&gt; Long.toString(timeUnit.convert((long) offset(h.getPercentiles(), summaryOutputOffset), TimeUnit.NANOSECONDS))).</span>
+<span class="nc" id="L178">                                collect(Collectors.joining(&quot;,&quot;)));</span>
+<span class="nc" id="L179">    }</span>
+
+    private double offset(double[] percentiles, int offset) {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        return offset &gt;= 0 ? percentiles[offset] : percentiles[percentiles.length + offset];</span>
+    }
+
+    private String count() {
+<span class="fc" id="L186">        final StringBuilder sb = new StringBuilder(&quot;        &quot;);</span>
+<span class="fc" id="L187">        histos.forEach((id, histogram) -&gt; sb.append(String.format(&quot;%12d &quot;, histogram.totalCount())));</span>
+<span class="fc" id="L188">        return sb.toString();</span>
+    }
+
+    private String percentiles(final int index) {
+<span class="fc" id="L192">        final StringBuilder sb = new StringBuilder(&quot;        &quot;);</span>
+<span class="fc" id="L193">        histos.forEach((id, histogram) -&gt; {</span>
+<span class="fc" id="L194">            double[] percentiles = histogram.getPercentiles();</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">            if (index &gt;= percentiles.length - 1) {</span>
+<span class="fc" id="L196">                sb.append(String.format(&quot;%12s &quot;, &quot; &quot;));</span>
+<span class="fc" id="L197">                return;</span>
+            }
+<span class="fc" id="L199">            int myIndex = index;</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">            if (myIndex == -1) myIndex = percentiles.length - 1;</span>
+<span class="fc" id="L201">            double value = percentiles[myIndex];</span>
+<span class="fc" id="L202">            sb.append(String.format(&quot;%12d &quot;, timeUnit.convert((long) value, TimeUnit.NANOSECONDS)));</span>
+<span class="fc" id="L203">        });</span>
+<span class="fc" id="L204">        return sb.toString();</span>
+    }
+
+    private WireParselet parselet() {
+<span class="fc" id="L208">        return (methodName, v) -&gt; {</span>
+<span class="fc" id="L209">            v.skipValue();</span>
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">            if (counter &lt; ignore)</span>
+<span class="nc" id="L211">                return;</span>
+<span class="fc" id="L212">            final MessageHistory history = MessageHistory.get();</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">            if (history == null)</span>
+<span class="nc" id="L214">                return;</span>
+
+<span class="fc" id="L216">            processMessage(methodName, history);</span>
+
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">            if (history.timings() &gt; 0) {</span>
+<span class="fc" id="L219">                long firstTiming = history.timing(0);</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">                if (measurementWindowNanos &gt; 0) {</span>
+<span class="nc" id="L221">                    long windowCount = firstTiming / measurementWindowNanos;</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                    if (windowCount &gt; lastWindowCount) {</span>
+<span class="nc" id="L223">                        windowPassed();</span>
+<span class="nc" id="L224">                        lastWindowCount = windowCount;</span>
+                    }
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (firstTimeStampNanos == 0)</span>
+<span class="nc" id="L227">                        firstTimeStampNanos = firstTiming;</span>
+                }
+            }
+<span class="fc" id="L230">        };</span>
+    }
+
+    private void processMessage(CharSequence methodName, MessageHistory history) {
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">        CharSequence extraHistoId = histosByMethod ? (&quot;_&quot; + methodName) : &quot;&quot;;</span>
+<span class="fc" id="L235">        long lastTime = 0;</span>
+        // if the tailer has recordHistory(true) then the MessageHistory will be
+        // written with a single timing and nothing else. This is then carried through
+<span class="fc" id="L238">        int firstWriteOffset = history.timings() - (history.sources() * 2);</span>
+<span class="pc bpc" id="L239" title="2 of 4 branches missed.">        if (!(firstWriteOffset == 0 || firstWriteOffset == 1))</span>
+            // don't know how this can happen, but there is at least one CQ that exhibits it
+<span class="nc" id="L241">            return;</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">        for (int sourceIndex = 0; sourceIndex &lt; history.sources(); sourceIndex++) {</span>
+<span class="fc" id="L243">            String histoId = Integer.toString(history.sourceId(sourceIndex)) + extraHistoId;</span>
+<span class="fc" id="L244">            Histogram histo = histos.computeIfAbsent(histoId, s -&gt; histogram());</span>
+<span class="fc" id="L245">            long receivedByThisComponent = history.timing((2 * sourceIndex) + firstWriteOffset);</span>
+<span class="fc" id="L246">            long processedByThisComponent = history.timing((2 * sourceIndex) + firstWriteOffset + 1);</span>
+<span class="fc" id="L247">            histo.sample((double) (processedByThisComponent - receivedByThisComponent));</span>
+<span class="pc bpc" id="L248" title="1 of 4 branches missed.">            if (lastTime == 0 &amp;&amp; firstWriteOffset &gt; 0) {</span>
+<span class="fc" id="L249">                Histogram histo1 = histos.computeIfAbsent(&quot;startTo&quot; + histoId, s -&gt; histogram());</span>
+<span class="fc" id="L250">                histo1.sample((double) (receivedByThisComponent - history.timing(0)));</span>
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">            } else if (lastTime != 0) {</span>
+<span class="fc" id="L252">                Histogram histo1 = histos.computeIfAbsent(history.sourceId(sourceIndex - 1) + &quot;to&quot; + histoId, s -&gt; histogram());</span>
+                // here we are comparing System.nanoTime across processes. YMMV
+<span class="fc" id="L254">                histo1.sample((double) (receivedByThisComponent - lastTime));</span>
+            }
+<span class="fc" id="L256">            lastTime = processedByThisComponent;</span>
+        }
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">        if (history.sources() &gt; 1) {</span>
+<span class="fc" id="L259">            Histogram histoE2E = histos.computeIfAbsent(&quot;endToEnd&quot;, s -&gt; histogram());</span>
+<span class="fc" id="L260">            histoE2E.sample((double) (history.timing(history.timings() - 1) - history.timing(0)));</span>
+        }
+<span class="fc" id="L262">    }</span>
+
+    protected void windowPassed() {
+<span class="nc" id="L265">        outputData();</span>
+<span class="nc" id="L266">        histos.values().forEach(Histogram::reset);</span>
+<span class="nc" id="L267">    }</span>
+
+    @NotNull
+    protected Histogram histogram() {
+<span class="fc" id="L271">        return new Histogram(60, 4);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

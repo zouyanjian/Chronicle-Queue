@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReadonlyTableStore.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.table</a> &gt; <span class="el_source">ReadonlyTableStore.java</span></div><h1>ReadonlyTableStore.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2014-2020 chronicle.software
+ *
+ * http://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.table;
+
+import net.openhft.chronicle.bytes.MappedBytes;
+import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.values.LongValue;
+import net.openhft.chronicle.queue.impl.TableStore;
+import net.openhft.chronicle.wire.WireOut;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.io.File;
+import java.util.function.Function;
+
+public class ReadonlyTableStore&lt;T extends Metadata&gt; extends AbstractCloseable implements TableStore&lt;T&gt; {
+    private final T metadata;
+
+<span class="fc" id="L34">    public ReadonlyTableStore(T metadata) {</span>
+<span class="fc" id="L35">        this.metadata = metadata;</span>
+<span class="fc" id="L36">    }</span>
+
+    @Override
+    public T metadata() {
+<span class="nc" id="L40">        return metadata;</span>
+    }
+
+    @Override
+    protected void performClose() {
+<span class="fc" id="L45">    }</span>
+
+    @Override
+    public LongValue acquireValueFor(CharSequence key, long defaultValue) {
+<span class="nc" id="L49">        throw new UnsupportedOperationException(&quot;Read only&quot;);</span>
+    }
+
+@Override
+    public &lt;T&gt; void forEachKey(T accumulator, TableStoreIterator&lt;T&gt; tsIterator) {
+<span class="nc" id="L54">        throw new UnsupportedOperationException(&quot;Read only&quot;);</span>
+    }
+
+    @Override
+    public &lt;R&gt; R doWithExclusiveLock(Function&lt;TableStore&lt;T&gt;, ? extends R&gt; code) {
+<span class="nc" id="L59">        UnsupportedOperationException read_only = new UnsupportedOperationException(&quot;Read only&quot;);</span>
+<span class="nc" id="L60">        read_only.printStackTrace();</span>
+<span class="nc" id="L61">        throw read_only;</span>
+    }
+
+    @Nullable
+    @Override
+    public File file() {
+<span class="nc" id="L67">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L69">        UnsupportedOperationException read_only = new UnsupportedOperationException(&quot;Read only&quot;);</span>
+<span class="nc" id="L70">        read_only.printStackTrace();</span>
+<span class="nc" id="L71">        throw read_only;</span>
+    }
+
+    @NotNull
+    @Override
+    public MappedBytes bytes() {
+<span class="nc" id="L77">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L79">        UnsupportedOperationException read_only = new UnsupportedOperationException(&quot;Read only&quot;);</span>
+<span class="nc" id="L80">        read_only.printStackTrace();</span>
+<span class="nc" id="L81">        throw read_only;</span>
+    }
+
+    @NotNull
+    @Override
+    public String dump() {
+<span class="nc" id="L87">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L89">        UnsupportedOperationException read_only = new UnsupportedOperationException(&quot;Read only&quot;);</span>
+<span class="nc" id="L90">        read_only.printStackTrace();</span>
+<span class="nc" id="L91">        throw read_only;</span>
+    }
+
+    @NotNull
+    @Override
+    public String shortDump() {
+<span class="nc" id="L97">        throwExceptionIfClosed();</span>
+
+<span class="nc" id="L99">        UnsupportedOperationException read_only = new UnsupportedOperationException(&quot;Read only&quot;);</span>
+<span class="nc" id="L100">        read_only.printStackTrace();</span>
+<span class="nc" id="L101">        throw read_only;</span>
+    }
+
+    @Override
+    public void writeMarshallable(@NotNull WireOut wire) {
+        ;
+<span class="nc" id="L107">        UnsupportedOperationException read_only = new UnsupportedOperationException(&quot;Read only&quot;);</span>
+<span class="nc" id="L108">        read_only.printStackTrace();</span>
+<span class="nc" id="L109">        throw read_only;</span>
+    }
+
+    @Override
+    public boolean readOnly() {
+<span class="fc" id="L114">        return true;</span>
+    }
+
+    @Override
+    protected boolean threadSafetyCheck(boolean isUsed) {
+        // TableStore are thread safe
+<span class="nc" id="L120">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

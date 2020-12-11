@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SingleTableBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.table</a> &gt; <span class="el_source">SingleTableBuilder.java</span></div><h1>SingleTableBuilder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2016-2020 chronicle.software
+ *
+ * https://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.table;
+
+import net.openhft.chronicle.bytes.MappedBytes;
+import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.core.util.StringUtils;
+import net.openhft.chronicle.queue.impl.TableStore;
+import net.openhft.chronicle.queue.impl.single.MetaDataKeys;
+import net.openhft.chronicle.wire.ValueIn;
+import net.openhft.chronicle.wire.Wire;
+import net.openhft.chronicle.wire.WireType;
+import net.openhft.chronicle.wire.Wires;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.StreamCorruptedException;
+import java.nio.file.Path;
+import java.util.Objects;
+
+import static net.openhft.chronicle.core.pool.ClassAliasPool.CLASS_ALIASES;
+
+public class SingleTableBuilder&lt;T extends Metadata&gt; {
+
+    static {
+<span class="fc" id="L44">        CLASS_ALIASES.addAlias(WireType.class);</span>
+<span class="fc" id="L45">        CLASS_ALIASES.addAlias(SingleTableStore.class, &quot;STStore&quot;);</span>
+<span class="fc" id="L46">    }</span>
+
+    @NotNull
+    private final File file;
+    @NotNull
+    private T metadata;
+
+    private WireType wireType;
+    private boolean readOnly;
+
+<span class="fc" id="L56">    private SingleTableBuilder(@NotNull File path, @NotNull T metadata) {</span>
+<span class="fc" id="L57">        this.file = path;</span>
+<span class="fc" id="L58">        this.metadata = metadata;</span>
+<span class="fc" id="L59">    }</span>
+
+    @NotNull
+    public static &lt;T extends Metadata&gt; SingleTableBuilder&lt;T&gt; builder(@NotNull File file, @NotNull WireType wireType, @NotNull T metadata) {
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">        if (file.isDirectory()) {</span>
+<span class="nc" id="L64">            throw new IllegalArgumentException(&quot;Tables should be configured with the table file, not a directory. Actual file used: &quot; + file.getParentFile());</span>
+        }
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">        if (!file.getName().endsWith(SingleTableStore.SUFFIX)) {</span>
+<span class="nc" id="L67">            throw new IllegalArgumentException(&quot;Invalid file type: &quot; + file.getName());</span>
+        }
+
+<span class="fc" id="L70">        return new SingleTableBuilder&lt;&gt;(file, metadata).wireType(wireType);</span>
+    }
+
+    @NotNull
+    public static &lt;T extends Metadata&gt; SingleTableBuilder&lt;T&gt; binary(@NotNull Path path, @NotNull T metadata) {
+<span class="nc" id="L75">        return binary(path.toFile(), metadata);</span>
+    }
+
+    @NotNull
+    public static &lt;T extends Metadata&gt; SingleTableBuilder&lt;T&gt; binary(@NotNull String file, @NotNull T metadata) {
+<span class="nc" id="L80">        return binary(new File(file), metadata);</span>
+    }
+
+    @NotNull
+    public static &lt;T extends Metadata&gt; SingleTableBuilder&lt;T&gt; binary(@NotNull File basePathFile, @NotNull T metadata) {
+<span class="fc" id="L85">        return builder(basePathFile, WireType.BINARY_LIGHT, metadata);</span>
+    }
+
+    // *************************************************************************
+    //
+    // *************************************************************************
+
+    @NotNull
+    public TableStore&lt;T&gt; build() {
+<span class="fc bfc" id="L94" title="All 4 branches covered.">        if (readOnly &amp;&amp; !file.exists())</span>
+<span class="fc" id="L95">            throw new IORuntimeException(&quot;File not found in readOnly mode&quot;);</span>
+
+        try {
+<span class="pc bpc" id="L98" title="1 of 6 branches missed.">            if (!readOnly &amp;&amp; file.createNewFile() &amp;&amp; !file.canWrite())</span>
+<span class="nc" id="L99">                throw new IllegalStateException(&quot;Cannot write to tablestore file &quot; + file);</span>
+<span class="fc" id="L100">            MappedBytes bytes = MappedBytes.mappedBytes(file, OS.SAFE_PAGE_SIZE, OS.SAFE_PAGE_SIZE, readOnly);</span>
+            // eagerly initialize backing MappedFile page - otherwise wire.writeFirstHeader() will try to lock the file
+            // to allocate the first byte store and that will cause lock overlap
+<span class="fc" id="L103">            bytes.readVolatileInt(0);</span>
+<span class="fc" id="L104">            Wire wire = wireType.apply(bytes);</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">            if (readOnly)</span>
+<span class="fc" id="L106">                return SingleTableStore.doWithSharedLock(file, (v) -&gt; {</span>
+                    try {
+<span class="fc" id="L108">                        return readTableStore(wire);</span>
+<span class="nc" id="L109">                    } catch (IOException ex) {</span>
+<span class="nc" id="L110">                        throw Jvm.rethrow(ex);</span>
+                    }
+<span class="fc" id="L112">                }, () -&gt; null);</span>
+            else
+<span class="fc" id="L114">                return SingleTableStore.doWithExclusiveLock(file, (v) -&gt; {</span>
+                    try {
+<span class="fc bfc" id="L116" title="All 2 branches covered.">                        if (wire.writeFirstHeader()) {</span>
+<span class="fc" id="L117">                            return writeTableStore(bytes, wire);</span>
+                        } else {
+<span class="fc" id="L119">                            return readTableStore(wire);</span>
+                        }
+<span class="nc" id="L121">                    } catch (IOException ex) {</span>
+<span class="nc" id="L122">                        throw Jvm.rethrow(ex);</span>
+                    }
+<span class="fc" id="L124">                }, () -&gt; null);</span>
+<span class="fc" id="L125">        } catch (IOException e) {</span>
+<span class="fc" id="L126">            throw new IORuntimeException(&quot;file=&quot; + file.getAbsolutePath(), e);</span>
+        }
+    }
+
+    @NotNull
+    private TableStore&lt;T&gt; readTableStore(Wire wire) throws StreamCorruptedException {
+<span class="fc" id="L132">        wire.readFirstHeader();</span>
+
+<span class="fc" id="L134">        StringBuilder name = Wires.acquireStringBuilder();</span>
+<span class="fc" id="L135">        ValueIn valueIn = wire.readEventName(name);</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">        if (StringUtils.isEqual(name, MetaDataKeys.header.name())) {</span>
+<span class="fc" id="L137">            @NotNull TableStore&lt;T&gt; existing = Objects.requireNonNull(valueIn.typedMarshallable());</span>
+<span class="fc" id="L138">            metadata.overrideFrom(existing.metadata());</span>
+<span class="fc" id="L139">            return existing;</span>
+        } else {
+<span class="nc" id="L141">            throw new StreamCorruptedException(&quot;The first message should be the header, was &quot; + name);</span>
+        }
+    }
+
+    @NotNull
+    private TableStore&lt;T&gt; writeTableStore(MappedBytes bytes, Wire wire) {
+<span class="fc" id="L147">        TableStore&lt;T&gt; store = new SingleTableStore&lt;&gt;(wireType, bytes, metadata);</span>
+<span class="fc" id="L148">        wire.writeEventName(&quot;header&quot;).object(store);</span>
+<span class="fc" id="L149">        wire.updateFirstHeader();</span>
+<span class="fc" id="L150">        return store;</span>
+    }
+
+    @NotNull
+    @Override
+    public SingleTableBuilder&lt;T&gt; clone() {
+        try {
+            @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L158">            SingleTableBuilder&lt;T&gt; clone = (SingleTableBuilder) super.clone();</span>
+<span class="nc" id="L159">            return clone;</span>
+<span class="nc" id="L160">        } catch (CloneNotSupportedException e) {</span>
+<span class="nc" id="L161">            throw new AssertionError(e);</span>
+        }
+    }
+
+    @NotNull
+    public File file() {
+<span class="nc" id="L167">        return file;</span>
+    }
+
+    public WireType wireType() {
+<span class="nc" id="L171">        return wireType;</span>
+    }
+
+    public SingleTableBuilder&lt;T&gt; wireType(WireType wireType) {
+<span class="fc" id="L175">        this.wireType = wireType;</span>
+<span class="fc" id="L176">        return this;</span>
+    }
+
+    public boolean readOnly() {
+<span class="nc" id="L180">        return readOnly;</span>
+    }
+
+    public SingleTableBuilder&lt;T&gt; readOnly(boolean readOnly) {
+<span class="fc" id="L184">        this.readOnly = readOnly;</span>
+<span class="fc" id="L185">        return this;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

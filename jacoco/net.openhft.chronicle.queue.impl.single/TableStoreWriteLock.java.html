@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TableStoreWriteLock.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.impl.single</a> &gt; <span class="el_source">TableStoreWriteLock.java</span></div><h1>TableStoreWriteLock.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2014-2020 chronicle.software
+ *
+ * http://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.openhft.chronicle.queue.impl.single;
+
+import net.openhft.chronicle.core.StackTrace;
+import net.openhft.chronicle.queue.impl.TableStore;
+import net.openhft.chronicle.queue.impl.table.AbstractTSQueueLock;
+import net.openhft.chronicle.threads.TimingPauser;
+import net.openhft.chronicle.wire.UnrecoverableTimeoutException;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
+
+import static net.openhft.chronicle.core.Jvm.warn;
+
+<span class="pc bpc" id="L33" title="1 of 2 branches missed.">public class TableStoreWriteLock extends AbstractTSQueueLock implements WriteLock {</span>
+    private static final String LOCK_KEY = &quot;chronicle.write.lock&quot;;
+    public static final String APPEND_LOCK_KEY = &quot;chronicle.append.lock&quot;;
+    private final long timeout;
+<span class="fc" id="L37">    private Thread lockedByThread = null;</span>
+    private StackTrace lockedHere;
+
+    public TableStoreWriteLock(final TableStore&lt;?&gt; tableStore, Supplier&lt;TimingPauser&gt; pauser, Long timeoutMs, final String lockKey) {
+<span class="fc" id="L41">        super(lockKey, tableStore, pauser);</span>
+<span class="fc" id="L42">        timeout = timeoutMs;</span>
+<span class="fc" id="L43">    }</span>
+
+    public TableStoreWriteLock(final TableStore&lt;?&gt; tableStore, Supplier&lt;TimingPauser&gt; pauser, Long timeoutMs) {
+<span class="fc" id="L46">        super(LOCK_KEY, tableStore, pauser);</span>
+<span class="fc" id="L47">        timeout = timeoutMs;</span>
+<span class="fc" id="L48">    }</span>
+
+    /**
+     * Guaranteed to succeed in getting the lock (may involve timeout and recovery) or else throw.
+     * &lt;p&gt;This is not re-entrant i.e. if you lock and try and lock again it will timeout and recover
+     */
+    @Override
+    public void lock() {
+<span class="fc" id="L56">        throwExceptionIfClosed();</span>
+
+<span class="pc bpc" id="L58" title="2 of 4 branches missed.">        assert checkNotAlreadyLocked();</span>
+
+<span class="fc" id="L60">        long value = 0;</span>
+        try {
+<span class="fc" id="L62">            int i = 0;</span>
+<span class="fc" id="L63">            value = lock.getVolatileValue();</span>
+<span class="fc bfc" id="L64" title="All 2 branches covered.">            while (!lock.compareAndSwapValue(UNLOCKED, PID)) {</span>
+                // add a tiny delay
+<span class="pc bpc" id="L66" title="1 of 4 branches missed.">                if (i++ &gt; 1000 &amp;&amp; Thread.interrupted())</span>
+<span class="nc" id="L67">                    throw new IllegalStateException(&quot;Interrupted for the lock file:&quot; + path);</span>
+<span class="fc" id="L68">                pauser.pause(timeout, TimeUnit.MILLISECONDS);</span>
+<span class="fc" id="L69">                value = lock.getVolatileValue();</span>
+            }
+
+            //noinspection ConstantConditions,AssertWithSideEffects
+<span class="pc bpc" id="L73" title="3 of 6 branches missed.">            assert (lockedByThread = Thread.currentThread()) != null</span>
+                    &amp;&amp; (lockedHere = new StackTrace()) != null;
+
+            // success
+<span class="fc" id="L77">        } catch (TimeoutException e) {</span>
+<span class="fc" id="L78">            final String lockedBy = getLockedBy(value);</span>
+<span class="fc" id="L79">            final String warningMsg = &quot;Couldn't acquire write lock &quot; +</span>
+                    &quot;after &quot; + timeout + &quot; ms &quot; +
+                    &quot;for the lock file:&quot; + path + &quot;. &quot; +
+                    &quot;Lock was held by &quot; + lockedBy;
+<span class="fc bfc" id="L83" title="All 2 branches covered.">            if (dontRecoverLockTimeout)</span>
+<span class="fc" id="L84">                throw new UnrecoverableTimeoutException(new IllegalStateException(warningMsg));</span>
+<span class="fc" id="L85">            warn().on(getClass(), warningMsg + &quot;. Unlocking forcibly&quot;);</span>
+<span class="fc" id="L86">            forceUnlock(value);</span>
+            // we should reset the pauser after a timeout exception
+<span class="fc" id="L88">            pauser.reset();</span>
+<span class="fc" id="L89">            lock();</span>
+        } finally {
+<span class="fc" id="L91">            pauser.reset();</span>
+        }
+<span class="fc" id="L93">    }</span>
+
+    @NotNull
+    protected String getLockedBy(long value) {
+<span class="pc bpc" id="L97" title="2 of 4 branches missed.">        final String lockedBy =</span>
+                value == Long.MIN_VALUE ? &quot;unknown&quot; :
+                        value == PID ? &quot;me&quot;
+<span class="pc" id="L100">                                : Long.toString((int) value);</span>
+<span class="fc" id="L101">        return lockedBy;</span>
+    }
+
+    private boolean checkNotAlreadyLocked() {
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        if (!locked())</span>
+<span class="fc" id="L106">            return true;</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">        if (lockedByThread == null)</span>
+<span class="fc" id="L108">            return true;</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">        if (lockedByThread == Thread.currentThread())</span>
+<span class="nc" id="L110">            throw new AssertionError(&quot;Lock is already acquired by current thread and is not reentrant - nested document context?&quot;, lockedHere);</span>
+<span class="fc" id="L111">        return true;</span>
+    }
+
+    @Override
+    public void unlock() {
+<span class="fc" id="L116">        throwExceptionIfClosed();</span>
+<span class="pc bpc" id="L117" title="1 of 2 branches missed.">        if (!lock.compareAndSwapValue(PID, UNLOCKED)) {</span>
+<span class="nc" id="L118">            long value = lock.getVolatileValue();</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">            if (value == UNLOCKED)</span>
+<span class="nc" id="L120">                warn().on(getClass(), &quot;Write lock was already unlocked. For the &quot; +</span>
+                        &quot;lock file:&quot; + path);
+            else
+<span class="nc" id="L123">                warn().on(getClass(), &quot;Write lock was locked by someone else! For the &quot; +</span>
+                        &quot;lock file:&quot; + path + &quot; &quot; +
+<span class="nc" id="L125">                        &quot;by PID: &quot; + getLockedBy(value));</span>
+        }
+        //noinspection ConstantConditions,AssertWithSideEffects
+<span class="fc" id="L128">        lockedByThread = null;</span>
+<span class="fc" id="L129">        lockedHere = null;</span>
+<span class="fc" id="L130">    }</span>
+
+    @Override
+    public boolean locked() {
+<span class="fc" id="L134">        throwExceptionIfClosed();</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        return lock.getVolatileValue(UNLOCKED) != UNLOCKED;</span>
+    }
+
+    /**
+     * Don't use this - for internal use only
+     */
+    public void forceUnlock() {
+<span class="nc" id="L142">        throwExceptionIfClosed();</span>
+
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (locked())</span>
+<span class="nc" id="L145">            forceUnlock(lockedBy());</span>
+<span class="nc" id="L146">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>

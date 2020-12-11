@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InternalHistoryMain.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">OpenHFT/Chronicle-Queue</a> &gt; <a href="index.source.html" class="el_package">net.openhft.chronicle.queue.internal.main</a> &gt; <span class="el_source">InternalHistoryMain.java</span></div><h1>InternalHistoryMain.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2014 Higher Frequency Trading
+ *
+ * http://chronicle.software
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.openhft.chronicle.queue.internal.main;
+
+
+import net.openhft.chronicle.queue.reader.HistoryReader;
+import org.apache.commons.cli.*;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.PrintWriter;
+import java.nio.file.Paths;
+import java.util.concurrent.TimeUnit;
+
+import static net.openhft.chronicle.queue.internal.main.InternalReaderMain.addOption;
+
+/**
+ * Reads @see MessageHistory from a chronicle and outputs histograms for
+ * &lt;ul&gt;
+ * &lt;li&gt;latencies for each component that has processed a message&lt;/li&gt;
+ * &lt;li&gt;latencies between each component that has processed a message&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Jerry Shea
+ */
+<span class="nc" id="L41">public class InternalHistoryMain {</span>
+
+    public static void main(@NotNull String[] args) {
+<span class="nc" id="L44">        new InternalHistoryMain().run(args);</span>
+<span class="nc" id="L45">    }</span>
+
+    public void run(String[] args) {
+<span class="nc" id="L48">        final Options options = options();</span>
+<span class="nc" id="L49">        final CommandLine commandLine = parseCommandLine(args, options);</span>
+
+<span class="nc" id="L51">        final HistoryReader chronicleHistoryReader = chronicleHistoryReader();</span>
+<span class="nc" id="L52">        setup(commandLine, chronicleHistoryReader);</span>
+<span class="nc" id="L53">        chronicleHistoryReader.execute();</span>
+<span class="nc" id="L54">    }</span>
+
+    protected void setup(CommandLine commandLine, HistoryReader chronicleHistoryReader) {
+<span class="nc" id="L57">        chronicleHistoryReader</span>
+<span class="nc" id="L58">                .withMessageSink(System.out::println)</span>
+<span class="nc" id="L59">                .withProgress(commandLine.hasOption('p'))</span>
+<span class="nc" id="L60">                .withHistosByMethod(commandLine.hasOption('m'))</span>
+<span class="nc" id="L61">                .withBasePath(Paths.get(commandLine.getOptionValue('d')));</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (commandLine.hasOption('t'))</span>
+<span class="nc" id="L63">            chronicleHistoryReader.withTimeUnit(TimeUnit.valueOf(commandLine.getOptionValue('t')));</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">        if (commandLine.hasOption('i'))</span>
+<span class="nc" id="L65">            chronicleHistoryReader.withIgnore(Long.parseLong(commandLine.getOptionValue('i')));</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (commandLine.hasOption('w'))</span>
+<span class="nc" id="L67">            chronicleHistoryReader.withMeasurementWindow(Long.parseLong(commandLine.getOptionValue('w')));</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (commandLine.hasOption('u'))</span>
+<span class="nc" id="L69">            chronicleHistoryReader.withSummaryOutput(Integer.parseInt(commandLine.getOptionValue('u')));</span>
+<span class="nc" id="L70">    }</span>
+
+    @NotNull
+    protected HistoryReader chronicleHistoryReader() {
+<span class="nc" id="L74">        return HistoryReader.create();</span>
+    }
+
+    protected CommandLine parseCommandLine(final @NotNull String[] args, final Options options) {
+<span class="nc" id="L78">        final CommandLineParser parser = new DefaultParser();</span>
+<span class="nc" id="L79">        CommandLine commandLine = null;</span>
+        try {
+<span class="nc" id="L81">            commandLine = parser.parse(options, args);</span>
+
+<span class="nc bnc" id="L83" title="All 2 branches missed.">            if (commandLine.hasOption('h')) {</span>
+<span class="nc" id="L84">                printHelpAndExit(options, 0);</span>
+            }
+<span class="nc" id="L86">        } catch (ParseException e) {</span>
+<span class="nc" id="L87">            printHelpAndExit(options, 1);</span>
+<span class="nc" id="L88">        }</span>
+
+<span class="nc" id="L90">        return commandLine;</span>
+    }
+
+    protected void printHelpAndExit(final Options options, int status) {
+<span class="nc" id="L94">        final PrintWriter writer = new PrintWriter(System.out);</span>
+<span class="nc" id="L95">        new HelpFormatter().printHelp(</span>
+                writer,
+                180,
+<span class="nc" id="L98">                this.getClass().getSimpleName(),</span>
+                null,
+                options,
+                HelpFormatter.DEFAULT_LEFT_PAD,
+                HelpFormatter.DEFAULT_DESC_PAD,
+                null,
+                true
+        );
+<span class="nc" id="L106">        writer.flush();</span>
+<span class="nc" id="L107">        System.exit(status);</span>
+<span class="nc" id="L108">    }</span>
+
+    @NotNull
+    protected Options options() {
+<span class="nc" id="L112">        final Options options = new Options();</span>
+<span class="nc" id="L113">        addOption(options, &quot;d&quot;, &quot;directory&quot;, true, &quot;Directory containing chronicle queue files&quot;, true);</span>
+<span class="nc" id="L114">        addOption(options, &quot;h&quot;, &quot;help-message&quot;, false, &quot;Print this help and exit&quot;, false);</span>
+<span class="nc" id="L115">        addOption(options, &quot;t&quot;, &quot;time unit&quot;, true, &quot;Time unit. Default nanos&quot;, false);</span>
+<span class="nc" id="L116">        addOption(options, &quot;i&quot;, &quot;ignore&quot;, true, &quot;How many items to ignore from start&quot;, false);</span>
+<span class="nc" id="L117">        addOption(options, &quot;w&quot;, &quot;window&quot;, true, &quot;Window duration in time unit. Instead of one output at the end, will output every window period&quot;, false);</span>
+<span class="nc" id="L118">        addOption(options, &quot;u&quot;, &quot;histo offset&quot;, true, &quot;Summary output. Instead of histograms, will show one value only, in CSV format. Set this to 0 for 50th, 1 for 90th etc., -1 for worst&quot;, false);</span>
+<span class="nc" id="L119">        options.addOption(new Option(&quot;p&quot;, false, &quot;Show progress&quot;));</span>
+<span class="nc" id="L120">        options.addOption(new Option(&quot;m&quot;, false, &quot;By method&quot;));</span>
+<span class="nc" id="L121">        return options;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.6.202009150832</span></div></body></html>
