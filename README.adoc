@@ -22,7 +22,7 @@ https://player.vimeo.com/video/201989439
 
 == What is Chronicle Queue
 
-What is Chronicle Queue
+What is Chronicle Queue?
 
 * You could consider Chronicle Queue to be similar to a low latency broker less durable/persisted JVM topic.
 
