@@ -1,6 +1,5 @@
 net.openhft.chronicle.queue
 net.openhft.chronicle.queue.backed.map
-net.openhft.chronicle.queue.batch
 net.openhft.chronicle.queue.impl
 net.openhft.chronicle.queue.impl.single
 net.openhft.chronicle.queue.impl.table
