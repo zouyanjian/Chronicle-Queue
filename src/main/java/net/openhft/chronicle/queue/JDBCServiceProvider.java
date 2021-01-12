@@ -26,6 +26,7 @@ import org.jetbrains.annotations.NotNull;
 import java.sql.Connection;
 import java.sql.SQLException;
 
+@Deprecated(/* to be removed by x.23 */)
 public interface JDBCServiceProvider extends Closeable {
 
     @NotNull

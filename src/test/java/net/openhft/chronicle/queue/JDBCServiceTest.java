@@ -29,6 +29,8 @@ import org.junit.Test;
 import java.io.File;
 import java.sql.DriverManager;
 import java.util.concurrent.atomic.AtomicLong;
+
+@Deprecated(/* to be removed by x.23 */)
 @Ignore
 public class JDBCServiceTest extends ChronicleQueueTestBase {
 

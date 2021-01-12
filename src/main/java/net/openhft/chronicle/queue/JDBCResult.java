@@ -19,6 +19,7 @@ package net.openhft.chronicle.queue;
 
 import java.util.List;
 
+@Deprecated(/* to be removed by x.23 */)
 public interface JDBCResult {
     void queryResult(List<String> columns, List<List<Object>> rows, String query, Object... args);
 
