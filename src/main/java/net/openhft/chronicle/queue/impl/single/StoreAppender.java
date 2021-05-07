@@ -89,21 +89,16 @@ class StoreAppender extends AbstractCloseable
         finalizer = Jvm.isResourceTracing() ? new Finalizer() : null;
     }
 
-    private void checkAppendLock() {
-        checkAppendLock(false);
-    }
-
     /**
      * check the appendLock
-     *
-     * @param allowMyProcess this will only be true for any writes coming from the sink replicator
+     * TODO: more comments
      */
-    private void checkAppendLock(boolean allowMyProcess) {
+    private void checkAppendLock() {
         if (appendLock.locked())
-            checkAppendLockLocked(allowMyProcess);
+            checkAppendLockLocked();
     }
 
-    private void checkAppendLockLocked(boolean allowMyProcess) {
+    private void checkAppendLockLocked() {
         // separate method as this is in fast path
         if (appendLock instanceof AbstractTSQueueLock) {
             final AbstractTSQueueLock appendLock = (AbstractTSQueueLock) this.appendLock;
@@ -111,7 +106,7 @@ class StoreAppender extends AbstractCloseable
             if (lockedBy == AbstractTSQueueLock.UNLOCKED)
                 return;
             boolean myPID = lockedBy == Jvm.getProcessId();
-            if (allowMyProcess && myPID)
+            if (myPID)
                 return;
             throw new IllegalStateException("locked: unable to append because a lock is being held by pid=" + (myPID ? "me" : lockedBy) + ", file=" + queue.file());
         } else
@@ -327,8 +322,7 @@ class StoreAppender extends AbstractCloseable
     // throws UnrecoverableTimeoutException
     public DocumentContext writingDocument(final boolean metaData) {
         throwExceptionIfClosed();
-        // we allow the sink process to write metaData
-        checkAppendLock(metaData);
+        checkAppendLock();
         count++;
         if (count > 1) {
             assert metaData == writeContext.metaData;
@@ -549,10 +543,8 @@ class StoreAppender extends AbstractCloseable
         writeBytesInternal(index, bytes, false);
     }
 
-
-
     protected void writeBytesInternal(final long index, @NotNull final BytesStore bytes, boolean metadata) {
-        checkAppendLock(true);
+        checkAppendLock();
 
         final int cycle = queue.rollCycle().toCycle(index);
 
@@ -562,7 +554,7 @@ class StoreAppender extends AbstractCloseable
         // in case our cached headerNumber is incorrect.
         resetPosition();
 
-        /// if the header number has changed then we will have roll
+        // if the header number has changed then we will have to roll
         if (this.cycle != cycle)
             rollCycleTo(cycle, this.cycle > cycle);
 
