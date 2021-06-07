@@ -28,6 +28,8 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.AccessDeniedException;
 import java.util.Arrays;
 
@@ -88,6 +90,33 @@ public class ReadWriteTest extends QueueTestCommon {
             }
         }
     }
+
+    @Test
+    public void testEmptyMetadataFile() throws IOException {
+        assumeFalse(OS.isWindows());
+
+        File meta = new File(chroniclePath, "metadata.cq4t");
+        assertTrue(meta.exists());
+
+        try (RandomAccessFile raf = new RandomAccessFile(meta, "rw")) {
+            raf.setLength(0);
+        }
+
+        try (ChronicleQueue out = SingleChronicleQueueBuilder
+                .binary(chroniclePath)
+                .testBlockSize()
+                .readOnly(true)
+                .build()) {
+
+            try (final ExcerptTailer tailer = out.createTailer()) {
+                assertEquals(STR1, tailer.readText());
+                try (DocumentContext dc = tailer.readingDocument()) {
+                    assertEquals(STR2, dc.wire().bytes().readUtf8());
+                }
+            }
+        }
+    }
+
 
     // Can't append to a read-only chronicle
     @Test(expected = IllegalStateException.class)
