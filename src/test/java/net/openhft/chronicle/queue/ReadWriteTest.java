@@ -92,8 +92,12 @@ public class ReadWriteTest extends QueueTestCommon {
     }
 
     @Test
-    public void testEmptyMetadataFile() throws IOException {
+    public void testNotInitializedMetadataFile() throws IOException {
         assumeFalse(OS.isWindows());
+
+        final String expectedException = "Failback to readonly tablestore";
+        expectException(expectedException);
+        System.out.println("This test will produce a " + expectedException);
 
         File meta = new File(chroniclePath, "metadata.cq4t");
         assertTrue(meta.exists());
@@ -108,12 +112,10 @@ public class ReadWriteTest extends QueueTestCommon {
                 .readOnly(true)
                 .build()) {
 
-            try (final ExcerptTailer tailer = out.createTailer()) {
-                assertEquals(STR1, tailer.readText());
-                try (DocumentContext dc = tailer.readingDocument()) {
-                    assertEquals(STR2, dc.wire().bytes().readUtf8());
-                }
-            }
+            ExcerptTailer tailer = out.createTailer();
+            tailer.toEnd();
+            long index = tailer.index();
+            assertNotEquals(0, index);
         }
     }
 
