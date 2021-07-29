@@ -15,5 +15,6 @@ net.openhft.chronicle.queue.internal.writer
 net.openhft.chronicle.queue.jitter
 net.openhft.chronicle.queue.main
 net.openhft.chronicle.queue.reader
+net.openhft.chronicle.queue.reader.comparator
 net.openhft.chronicle.queue.service
 net.openhft.chronicle.queue.util
