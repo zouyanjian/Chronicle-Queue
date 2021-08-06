@@ -3695,4 +3695,29 @@ public class SingleChronicleQueueTest extends ChronicleQueueTestBase {
             }
         }
     }
+
+    @Test
+    public void failureModeOnEmptyDocumentReadText() {
+        File tmpDir = getTmpDir();
+        try (final SingleChronicleQueue queue = SingleChronicleQueueBuilder.single(tmpDir).build()) {
+
+            try (final ExcerptAppender appender = queue.acquireAppender()) {
+                try (final DocumentContext documentContext = appender.writingDocument()) {
+                    // write nothing
+                    //documentContext.wire().write("ttt").int32(12);
+                }
+            }
+
+            // Read the whole queue as text
+            try (final ExcerptTailer tailer = queue.createTailer()) {
+                int counter = 0;
+                String text;
+                while ((text = tailer.readText()) != null) {
+                    System.out.println("text: " + text);
+                    counter++;
+                }
+                assertEquals(0, counter);
+            }
+        }
+    }
 }
