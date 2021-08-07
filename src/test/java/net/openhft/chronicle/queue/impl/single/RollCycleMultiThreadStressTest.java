@@ -542,40 +542,37 @@ public class RollCycleMultiThreadStressTest {
 
     class PretoucherThread extends AbstractCloseable implements Callable<Throwable> {
 
-        final File path;
+        private final SingleChronicleQueue queue;
         volatile Throwable exception;
 
-        private ExcerptAppender appender0;
-
         PretoucherThread(File path) {
-            this.path = path;
+            this.queue = queueBuilder(path).build();
         }
 
         @SuppressWarnings("resource")
         @Override
         public Throwable call() {
-            ChronicleQueue queue0 = null;
-            try (ChronicleQueue queue = queueBuilder(path).build()) {
-                queue0 = queue;
+            try {
                 ExcerptAppender appender = queue.acquireAppender();
-                appender0 = appender;
                 // System.out.println("Starting pretoucher");
                 while (!Thread.currentThread().isInterrupted() && !queue.isClosed()) {
                     appender.pretouch();
                     Jvm.pause(50);
                 }
             } catch (Throwable e) {
-                if (e instanceof ClosedIllegalStateException || queue0 != null && queue0.isClosed())
+                if (e instanceof ClosedIllegalStateException || queue.isClosed())
                     return null;
                 exception = e;
                 return e;
+            } finally {
+                Closeable.closeQuietly(queue);
             }
             return null;
         }
 
         @Override
         protected void performClose() {
-            Closeable.closeQuietly(appender0);
+            Closeable.closeQuietly(queue);
         }
     }
 
