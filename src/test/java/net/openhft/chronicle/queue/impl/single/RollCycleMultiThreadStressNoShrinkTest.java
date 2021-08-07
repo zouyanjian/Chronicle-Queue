@@ -4,6 +4,10 @@ import org.junit.Test;
 
 public class RollCycleMultiThreadStressNoShrinkTest extends RollCycleMultiThreadStressTest {
 
+    public RollCycleMultiThreadStressNoShrinkTest() {
+        super(StressTestType.VANILLA);
+    }
+
     @Test
     public void stress() throws Exception {
         try {
@@ -15,6 +19,6 @@ public class RollCycleMultiThreadStressNoShrinkTest extends RollCycleMultiThread
     }
 
     public static void main(String[] args) throws Exception {
-        new RollCycleMultiThreadStressTest().stress();
+        new RollCycleMultiThreadStressNoShrinkTest().stress();
     }
 }

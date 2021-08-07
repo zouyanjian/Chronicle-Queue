@@ -7,14 +7,20 @@ import net.openhft.chronicle.queue.impl.RollingChronicleQueue;
 import net.openhft.chronicle.wire.DocumentContext;
 import net.openhft.chronicle.wire.ValueIn;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+@Ignore("double buffering is turned off currently")
 public class RollCycleMultiThreadStressDoubleBufferTest extends RollCycleMultiThreadStressTest {
 
     private AtomicBoolean queueDumped = new AtomicBoolean(false);
+
+    public RollCycleMultiThreadStressDoubleBufferTest() {
+        super(StressTestType.DOUBLEBUFFER);
+    }
 
     @Test
     public void stress() throws Exception {
@@ -24,10 +30,6 @@ public class RollCycleMultiThreadStressDoubleBufferTest extends RollCycleMultiTh
     @Before
     public void setUp() {
         queueDumped = new AtomicBoolean(false);
-    }
-
-    static {
-        System.setProperty("double_buffer", "true");
     }
 
     public static void main(String[] args) throws Exception {
