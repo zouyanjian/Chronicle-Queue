@@ -13,10 +13,6 @@ public class RollCycleMultiThreadStressSharedWriterQueueTest extends RollCycleMu
         super.stress();
     }
 
-    static {
-        System.setProperty("sharedWriteQ", "true");
-    }
-
     public static void main(String[] args) throws Exception {
         new RollCycleMultiThreadStressSharedWriterQueueTest().stress();
     }
