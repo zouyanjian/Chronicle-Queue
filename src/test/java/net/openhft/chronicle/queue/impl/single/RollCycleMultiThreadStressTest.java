@@ -60,7 +60,7 @@ public class RollCycleMultiThreadStressTest {
         this(StressTestType.VANILLA);
     }
 
-    public RollCycleMultiThreadStressTest(StressTestType type) {
+    protected RollCycleMultiThreadStressTest(StressTestType type) {
         SLEEP_PER_WRITE_NANOS = Long.getLong("writeLatency", 30_000);
         TEST_TIME = Integer.getInteger("testTime", 2);
         ROLL_EVERY_MS = Integer.getInteger("rollEvery", 300);
