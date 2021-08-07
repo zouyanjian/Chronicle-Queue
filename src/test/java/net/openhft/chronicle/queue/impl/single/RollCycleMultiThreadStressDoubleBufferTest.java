@@ -1,9 +1,9 @@
 package net.openhft.chronicle.queue.impl.single;
 
 import net.openhft.chronicle.core.Jvm;
-import net.openhft.chronicle.queue.DumpQueueMain;
 import net.openhft.chronicle.queue.ExcerptTailer;
 import net.openhft.chronicle.queue.impl.RollingChronicleQueue;
+import net.openhft.chronicle.queue.internal.main.InternalDumpMain;
 import net.openhft.chronicle.wire.DocumentContext;
 import net.openhft.chronicle.wire.ValueIn;
 import org.junit.Before;
@@ -84,7 +84,7 @@ public class RollCycleMultiThreadStressDoubleBufferTest extends RollCycleMultiTh
             if (skippedValue.size() > 0 || unexpectedValues.size() > 0) {
                 Jvm.error().on(getClass(), "Skipped " + skippedValue + ", Unexpected " + unexpectedValues);
                 if (DUMP_QUEUE && !queueDumped.getAndSet(true)) {
-                    DumpQueueMain.dump(queue.file(), System.out, Long.MAX_VALUE);
+                    InternalDumpMain.dump(queue.file(), System.out, Long.MAX_VALUE);
                 }
             }
         }
