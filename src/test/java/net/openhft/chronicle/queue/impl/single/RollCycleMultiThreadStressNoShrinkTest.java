@@ -6,11 +6,12 @@ public class RollCycleMultiThreadStressNoShrinkTest extends RollCycleMultiThread
 
     @Test
     public void stress() throws Exception {
-        super.stress();
-    }
-
-    static {
-        System.setProperty("chronicle.queue.disableFileShrinking", "true");
+        try {
+            System.setProperty("chronicle.queue.disableFileShrinking", "true");
+            super.stress();
+        } finally {
+            System.clearProperty("chronicle.queue.disableFileShrinking");
+        }
     }
 
     public static void main(String[] args) throws Exception {
