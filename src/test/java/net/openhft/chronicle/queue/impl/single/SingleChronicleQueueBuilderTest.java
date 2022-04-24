@@ -19,8 +19,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import static net.openhft.chronicle.queue.RollCycles.HOURLY;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.*;
 import static org.junit.Assume.assumeFalse;
 
 public class SingleChronicleQueueBuilderTest extends ChronicleQueueTestBase {
@@ -31,14 +30,17 @@ public class SingleChronicleQueueBuilderTest extends ChronicleQueueTestBase {
         expectException("reading control code as text");
         ignoreException("Unable to copy TimedStoreRecovery safely");
         expectException("Queues should be configured with the queue directory, not a specific filename");
+        ignoreException("Metadata file not found in readOnly mode");
 
         final Path path = Paths.get(OS.USER_DIR, TEST_QUEUE_FILE);
         final Path metadata = Paths.get(path.getParent().toString(), "metadata.cq4t");
         if (metadata.toFile().exists())
             Files.delete(metadata);
+
         try (final ChronicleQueue queue =
                      ChronicleQueue.singleBuilder(path)
                              .testBlockSize()
+                             .readOnly(true)
                              .build();
              final ExcerptTailer tailer = queue.createTailer();
              final DocumentContext dc = tailer.readingDocument()) {
@@ -48,6 +50,7 @@ public class SingleChronicleQueueBuilderTest extends ChronicleQueueTestBase {
         } finally {
             IOTools.deleteDirWithFiles(path.toFile(), 20);
         }
+        assertTrue(new File(TEST_QUEUE_FILE).length() < (1 << 20));
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -71,21 +74,28 @@ public class SingleChronicleQueueBuilderTest extends ChronicleQueueTestBase {
 
     @Test(expected = IllegalArgumentException.class)
     public void setAllNullFieldsShouldFailWithDifferentHierarchy() {
-        SingleChronicleQueueBuilder b1 = Wires.tupleFor(SingleChronicleQueueBuilder.class, "ChronicleQueueBuilder");
-        SingleChronicleQueueBuilder b2 = SingleChronicleQueueBuilder.builder();
+        OneExtendedBuilder b1 = new OneExtendedBuilder();
+        OtherExtendedBuilder b2 = new OtherExtendedBuilder();
         b2.bufferCapacity(98765);
         b1.blockSize(1234567);
         b2.setAllNullFields(b1);
     }
 
+    static class OneExtendedBuilder extends SingleChronicleQueueBuilder {
+    }
+
+    static class OtherExtendedBuilder extends SingleChronicleQueueBuilder {
+    }
+
     @Test
     public void testReadMarshallable() {
         expectException("Overriding roll epoch from existing metadata");
+        final String tmpDir = getTmpDir().toString();
         SingleChronicleQueueBuilder builder = Marshallable.fromString("!net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder {\n" +
                 "  writeBufferMode: None,\n" +
                 "  readBufferMode: None,\n" +
                 "  wireType: BINARY_LIGHT,\n" +
-                "  path: " + getTmpDir() +
+                "  path: " + tmpDir + ",\n" +
                 "  rollCycle: !net.openhft.chronicle.queue.RollCycles DAILY,\n" +
                 "  timeProvider: !net.openhft.chronicle.core.time.SystemTimeProvider INSTANCE,\n" +
                 "  rollTime: 17:02,\n" +

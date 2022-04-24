@@ -45,7 +45,7 @@ public class LongRunTestMain {
                 .rollCycle(RollCycles.HOURLY)
                 .build();
         final ExcerptAppender appender = queue.acquireAppender();
-        Jvm.setExceptionHandlers(Slf4jExceptionHandler.FATAL, Slf4jExceptionHandler.WARN, Slf4jExceptionHandler.WARN);
+        Jvm.setExceptionHandlers(Slf4jExceptionHandler.ERROR, Slf4jExceptionHandler.WARN, Slf4jExceptionHandler.WARN);
         for (int j = 0; j < 100; ++j) {
             for (int i = 0; i < 100000; ++i) {
                 appender.writeBytes(output);
@@ -121,7 +121,7 @@ public class LongRunTestMain {
         }
 
         @Override
-        public void writeMarshallable(@NotNull final BytesOut bytes) {
+        public void writeMarshallable(@NotNull final BytesOut<?> bytes) {
             bytes.writeLong(this.logEntry.getSessionId());
             bytes.writeInt(this.logEntry.getLogLevel());
             bytes.writeInt(this.logEntry.getSecurityLevel());

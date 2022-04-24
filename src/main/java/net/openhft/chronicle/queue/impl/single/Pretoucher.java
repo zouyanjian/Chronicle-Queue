@@ -4,6 +4,7 @@ import net.openhft.chronicle.bytes.MappedBytes;
 import net.openhft.chronicle.bytes.NewChunkListener;
 import net.openhft.chronicle.core.Jvm;
 import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.ClosedIllegalStateException;
 import net.openhft.chronicle.core.threads.InvalidEventHandlerException;
 import net.openhft.chronicle.core.time.TimeProvider;
 import net.openhft.chronicle.wire.Wire;
@@ -23,12 +24,14 @@ import java.util.function.IntConsumer;
  */
 public final class Pretoucher extends AbstractCloseable {
     static final long PRETOUCHER_PREROLL_TIME_DEFAULT_MS = 2_000L;
-    private static final long PRETOUCHER_PREROLL_TIME_MS = Long.getLong("SingleChronicleQueueExcerpts.pretoucherPrerollTimeMs", PRETOUCHER_PREROLL_TIME_DEFAULT_MS);
-    private static final boolean EARLY_ACQUIRE_NEXT_CYCLE = Jvm.getBoolean("SingleChronicleQueueExcerpts.earlyAcquireNextCycle");
+    private static final long PRETOUCHER_PREROLL_TIME_MS = Jvm.getLong("SingleChronicleQueueExcerpts.pretoucherPrerollTimeMs", PRETOUCHER_PREROLL_TIME_DEFAULT_MS);
+    private static final boolean EARLY_ACQUIRE_NEXT_CYCLE = Jvm.getBoolean("SingleChronicleQueueExcerpts.earlyAcquireNextCycle", false);
     private static final boolean CAN_WRITE = !Jvm.getBoolean("SingleChronicleQueueExcerpts.dontWrite");
     private final SingleChronicleQueue queue;
     private final NewChunkListener chunkListener;
     private final IntConsumer cycleChangedListener;
+    private final boolean earlyAcquireNextCycle;
+    private final boolean canWrite;
     private final PretoucherState pretoucherState;
     private final TimeProvider pretouchTimeProvider;
     private int currentCycle = Integer.MIN_VALUE;
@@ -36,32 +39,45 @@ public final class Pretoucher extends AbstractCloseable {
     private MappedBytes currentCycleMappedBytes;
 
     public Pretoucher(final SingleChronicleQueue queue) {
-        this(queue, null, c -> {
-        });
+        this(queue,
+                null,
+                c -> {
+                },
+                EARLY_ACQUIRE_NEXT_CYCLE,
+                CAN_WRITE);
     }
 
     // visible for testing
-    Pretoucher(final SingleChronicleQueue queue, final NewChunkListener chunkListener,
-               final IntConsumer cycleChangedListener) {
+    public Pretoucher(final SingleChronicleQueue queue, final NewChunkListener chunkListener,
+                      final IntConsumer cycleChangedListener,
+                      boolean earlyAcquireNextCycle,
+                      boolean canWrite) {
         this.queue = queue;
         this.chunkListener = chunkListener;
         this.cycleChangedListener = cycleChangedListener;
+        this.earlyAcquireNextCycle = earlyAcquireNextCycle;
+        this.canWrite = canWrite;
         queue.addCloseListener(this);
         pretoucherState = new PretoucherState(this::getStoreWritePosition);
         pretouchTimeProvider = () -> queue.time().currentTimeMillis() + (EARLY_ACQUIRE_NEXT_CYCLE ? PRETOUCHER_PREROLL_TIME_MS : 0);
     }
 
     public void execute() throws InvalidEventHandlerException {
-        if (isClosed())
-            throw new InvalidEventHandlerException();
-
-        throwExceptionIfClosed();
+        try {
+            throwExceptionIfClosed();
+        } catch (ClosedIllegalStateException e) {
+            throw new InvalidEventHandlerException(e);
+        }
 
         try {
             assignCurrentCycle();
 
             if (currentCycleMappedBytes != null)
                 pretoucherState.pretouch(currentCycleMappedBytes);
+
+        } catch (ClassCastException cce) {
+            Jvm.warn().on(getClass(), cce);
+
         } catch (IllegalStateException e) {
             if (queue.isClosed())
                 throw new InvalidEventHandlerException(e);
@@ -83,10 +99,10 @@ public final class Pretoucher extends AbstractCloseable {
         if (qCycle != currentCycle) {
             releaseResources();
 
-            if (CAN_WRITE)
+            if (canWrite)
                 queue.writeLock().lock();
             try {
-                if (!EARLY_ACQUIRE_NEXT_CYCLE && currentCycleWireStore != null && CAN_WRITE)
+                if (!earlyAcquireNextCycle && currentCycleWireStore != null && canWrite)
                     try {
                         final Wire wire = queue.wireType().apply(currentCycleMappedBytes);
                         wire.usePadding(currentCycleWireStore.dataVersion() > 0);
@@ -95,11 +111,11 @@ public final class Pretoucher extends AbstractCloseable {
                         Jvm.warn().on(getClass(), "unable to write the EOF file=" + currentCycleMappedBytes.mappedFile().file(), ex);
                     }
                 SingleChronicleQueueStore oldStore = currentCycleWireStore;
-                currentCycleWireStore = queue.storeForCycle(qCycle, queue.epoch(), CAN_WRITE, currentCycleWireStore);
+                currentCycleWireStore = queue.storeForCycle(qCycle, queue.epoch(), earlyAcquireNextCycle || canWrite, currentCycleWireStore);
                 if (oldStore != null && oldStore != currentCycleWireStore)
                     oldStore.close();
             } finally {
-                if (CAN_WRITE)
+                if (canWrite)
                     queue.writeLock().unlock();
             }
 
@@ -107,11 +123,11 @@ public final class Pretoucher extends AbstractCloseable {
                 currentCycleMappedBytes = currentCycleWireStore.bytes();
                 currentCycle = qCycle;
                 if (chunkListener != null)
-                    currentCycleMappedBytes.setNewChunkListener(chunkListener);
+                    currentCycleMappedBytes.mappedFile().setNewChunkListener(chunkListener);
 
                 cycleChangedListener.accept(qCycle);
 
-                if (EARLY_ACQUIRE_NEXT_CYCLE)
+                if (earlyAcquireNextCycle)
                     if (Jvm.isDebugEnabled(getClass()))
                         Jvm.debug().on(getClass(), "Pretoucher ROLLING early to next file=" + currentCycleWireStore.file());
             }

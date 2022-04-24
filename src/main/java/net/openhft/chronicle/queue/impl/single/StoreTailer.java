@@ -61,7 +61,6 @@ class StoreTailer extends AbstractCloseable
     private boolean readingDocumentFound = false;
     private long address = NO_PAGE;
     private boolean striding = false;
-    private boolean disableThreadSafetyCheck;
 
     public StoreTailer(@NotNull final SingleChronicleQueue queue, WireStorePool storePool) {
         this(queue, storePool, null);
@@ -84,6 +83,7 @@ class StoreTailer extends AbstractCloseable
             }
             finalizer = Jvm.isResourceTracing() ? new Finalizer() : null;
             error = false;
+
         } finally {
             if (error)
                 close();
@@ -91,19 +91,13 @@ class StoreTailer extends AbstractCloseable
     }
 
     @Override
-    public @NotNull ExcerptTailer disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
+    public @NotNull StoreTailer disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
         final Wire privateWire = privateWire();
         if (privateWire != null) {
             ((MappedBytes) privateWire.bytes()).disableThreadSafetyCheck(disableThreadSafetyCheck);
         }
-        this.disableThreadSafetyCheck = disableThreadSafetyCheck;
+        super.disableThreadSafetyCheck(disableThreadSafetyCheck);
         return this;
-    }
-
-    @Override
-    protected boolean threadSafetyCheck(boolean isUsed) {
-        return disableThreadSafetyCheck
-                || super.threadSafetyCheck(isUsed);
     }
 
     @Override
@@ -194,16 +188,11 @@ class StoreTailer extends AbstractCloseable
     @Override
     public DocumentContext readingDocument(final boolean includeMetaData) {
         DocumentContext documentContext = readingDocument0(includeMetaData);
-        checkReadRemaining(documentContext);
-        return documentContext;
-    }
-
-    @Deprecated(/* to do remove in x.22 */)
-    private void checkReadRemaining(DocumentContext documentContext) {
         // this check was added after a strange behaviour seen by one client. I should be impossible.
         if (documentContext.wire() != null)
             if (documentContext.wire().bytes().readRemaining() >= 1 << 30)
                 throw new AssertionError("readRemaining " + documentContext.wire().bytes().readRemaining());
+        return documentContext;
     }
 
     DocumentContext readingDocument0(final boolean includeMetaData) {
@@ -263,29 +252,6 @@ class StoreTailer extends AbstractCloseable
             }
         }
         return INSTANCE;
-    }
-
-    @SuppressWarnings("restriction")
-    @Override
-    public boolean peekDocument() {
-        throwExceptionIfClosed();
-
-        if (address == NO_PAGE || state != FOUND_IN_CYCLE || direction != FORWARD)
-            return peekDocument0();
-
-        final int header = MEMORY.readVolatileInt(address);
-
-        if (header == END_OF_DATA)
-            return peekDocument0();
-
-        return header > 0x0;
-    }
-
-    private boolean peekDocument0() {
-        try (DocumentContext dc = readingDocument()) {
-            dc.rollbackOnClose();
-            return dc.isPresent();
-        }
     }
 
     // throws UnrecoverableTimeoutException
@@ -511,6 +477,15 @@ class StoreTailer extends AbstractCloseable
     }
 
     private long nextIndexWithNextAvailableCycle(final int cycle) {
+        try {
+            return nextIndexWithNextAvailableCycle0(cycle);
+        } catch (MissingStoreFileException e) {
+            queue.refreshDirectoryListing();
+            return nextIndexWithNextAvailableCycle0(cycle);
+        }
+    }
+
+    private long nextIndexWithNextAvailableCycle0(final int cycle) {
         assert cycle != Integer.MIN_VALUE : "cycle == Integer.MIN_VALUE";
 
         if (cycle > queue.lastCycle() || direction == TailerDirection.NONE) {
@@ -698,9 +673,7 @@ class StoreTailer extends AbstractCloseable
         return scanResult;
     }
 
-    @NotNull
-    @Override
-    public final ExcerptTailer toStart() {
+    private ExcerptTailer doToStart() {
         assert direction != BACKWARD;
         final int firstCycle = queue.firstCycle();
         if (firstCycle == Integer.MAX_VALUE) {
@@ -711,9 +684,10 @@ class StoreTailer extends AbstractCloseable
         if (firstCycle != this.cycle) {
             // moves to the expected cycle
             final boolean found = cycle(firstCycle);
-            assert found || store == null;
             if (found)
                 state = FOUND_IN_CYCLE;
+            else if (store != null)
+                throw new MissingStoreFileException("Missing first store file cycle=" + firstCycle);
         }
         index(queue.rollCycle().toIndex(cycle, 0));
 
@@ -724,6 +698,17 @@ class StoreTailer extends AbstractCloseable
             address = wire.bytes().addressForRead(0);
         }
         return this;
+    }
+
+    @NotNull
+    @Override
+    public final ExcerptTailer toStart() {
+        try {
+            return doToStart();
+        } catch (MissingStoreFileException e) {
+            queue.refreshDirectoryListing();
+            return doToStart();
+        }
     }
 
     private boolean moveToIndexInternal(final long index) {
@@ -760,7 +745,7 @@ class StoreTailer extends AbstractCloseable
                 lastCycle, queue.epoch(), false, this.store);
         this.setCycle(lastCycle);
         if (wireStore == null)
-            throw new IllegalStateException("Store not found for cycle " + Long.toHexString(lastCycle) + ". Probably the files were removed?");
+            throw new MissingStoreFileException("Store not found for cycle " + Long.toHexString(lastCycle) + ". Probably the files were removed? queue=" + queue.fileAbsolutePath());
 
         if (this.store != wireStore) {
             releaseStore();
@@ -780,7 +765,7 @@ class StoreTailer extends AbstractCloseable
                 lastCycle--;
                 try {
                     return approximateLastCycle2(lastCycle);
-                } catch (IllegalStateException e) {
+                } catch (MissingStoreFileException e) {
                     // try again.
                 }
             }
@@ -814,7 +799,7 @@ class StoreTailer extends AbstractCloseable
         final WireType wireType = queue.wireType();
 
         final MappedBytes bytes = store.bytes();
-        bytes.disableThreadSafetyCheck(disableThreadSafetyCheck);
+        bytes.disableThreadSafetyCheck(disableThreadSafetyCheck());
         final Wire wire2 = wireType.apply(bytes);
         wire2.usePadding(store.dataVersion() > 0);
         final AbstractWire wire = (AbstractWire) readAnywhere(wire2);
@@ -848,7 +833,16 @@ class StoreTailer extends AbstractCloseable
             return callOriginalToEnd();
         }
 
-        return optimizedToEnd();
+        return callOptimizedToEnd();
+    }
+
+    private ExcerptTailer callOptimizedToEnd() {
+        try {
+            return optimizedToEnd();
+        } catch (MissingStoreFileException e) {
+            queue.refreshDirectoryListing();
+            return optimizedToEnd();
+        }
     }
 
     @NotNull
@@ -899,7 +893,7 @@ class StoreTailer extends AbstractCloseable
                     lastCycle, queue.epoch(), false, this.store);
             this.setCycle(lastCycle);
             if (wireStore == null)
-                throw new IllegalStateException("Store not found for cycle " + Long.toHexString(lastCycle) + ". Probably the files were removed? lastCycle=" + lastCycle);
+                throw new MissingStoreFileException("Store not found for cycle " + Long.toHexString(lastCycle) + ". Probably the files were removed? queue=" + queue.fileAbsolutePath());
 
             if (this.store != wireStore) {
                 releaseStore();
@@ -930,7 +924,6 @@ class StoreTailer extends AbstractCloseable
     }
 
     @NotNull
-
     public ExcerptTailer originalToEnd() {
         throwExceptionIfClosed();
 
@@ -1057,7 +1050,7 @@ class StoreTailer extends AbstractCloseable
     }
 
     private boolean tryWindBack(final int cycle) {
-        final long count = queue.exceptsPerCycle(cycle);
+        final long count = queue.exactExcerptsInCycle(cycle);
         if (count <= 0)
             return false;
         final RollCycle rollCycle = queue.rollCycle();
@@ -1208,8 +1201,6 @@ class StoreTailer extends AbstractCloseable
     }
 
     public void setCycle(final int cycle) {
-        throwExceptionIfClosedInSetter();
-
         this.cycle = cycle;
     }
 

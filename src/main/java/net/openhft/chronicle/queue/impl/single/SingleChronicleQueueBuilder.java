@@ -36,10 +36,7 @@ import net.openhft.chronicle.core.util.ObjectUtils;
 import net.openhft.chronicle.core.util.ThrowingBiFunction;
 import net.openhft.chronicle.core.util.Updater;
 import net.openhft.chronicle.queue.*;
-import net.openhft.chronicle.queue.impl.RollingChronicleQueue;
-import net.openhft.chronicle.queue.impl.StoreFileListener;
-import net.openhft.chronicle.queue.impl.TableStore;
-import net.openhft.chronicle.queue.impl.WireStoreFactory;
+import net.openhft.chronicle.queue.impl.*;
 import net.openhft.chronicle.queue.impl.table.ReadonlyTableStore;
 import net.openhft.chronicle.queue.impl.table.SingleTableBuilder;
 import net.openhft.chronicle.queue.internal.domestic.QueueOffsetSpec;
@@ -74,10 +71,8 @@ import static net.openhft.chronicle.wire.WireType.DEFAULT_ZERO_BINARY;
 import static net.openhft.chronicle.wire.WireType.DELTA_BINARY;
 
 public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable implements Cloneable, Builder<SingleChronicleQueue> {
-    @Deprecated /* For removal in x.22, Use QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY instead*/
-    public static final String DEFAULT_ROLL_CYCLE_PROPERTY = QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY;
+    public static final long DEFAULT_SPARSE_CAPACITY = 512L << 30;
     private static final Constructor ENTERPRISE_QUEUE_CONSTRUCTOR;
-
     private static final WireStoreFactory storeFactory = SingleChronicleQueueBuilder::createStore;
     private static final Supplier<TimingPauser> TIMING_PAUSER_SUPPLIER = DefaultPauserSupplier.INSTANCE;
 
@@ -104,6 +99,8 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
     private BufferMode readBufferMode = BufferMode.None;
     private WireType wireType = WireType.BINARY_LIGHT;
     private Long blockSize;
+    private Boolean useSparseFiles;
+    private Long sparseCapacity;
     private File path;
     private RollCycle rollCycle;
     private Long epoch; // default is 1970-01-01 00:00:00.000 UTC
@@ -131,18 +128,16 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
     private StoreFileListener storeFileListener;
 
     private Boolean readOnly;
-    @Deprecated(/* to be removed in x.23 */)
-    private Boolean strongAppenders;
     private boolean checkInterrupts;
 
     private transient TableStore<SCQMeta> metaStore;
 
     // enterprise stuff
     private int deltaCheckpointInterval = -1;
-    private Supplier<BiConsumer<BytesStore, Bytes>> encodingSupplier;
-    private Supplier<BiConsumer<BytesStore, Bytes>> decodingSupplier;
-    private Updater<Bytes> messageInitializer;
-    private Consumer<Bytes> messageHeaderReader;
+    private Supplier<BiConsumer<BytesStore, Bytes<?>>> encodingSupplier;
+    private Supplier<BiConsumer<BytesStore, Bytes<?>>> decodingSupplier;
+    private Updater<Bytes<?>> messageInitializer;
+    private Consumer<Bytes<?>> messageHeaderReader;
     private SecretKeySpec key;
 
     private int maxTailers;
@@ -153,6 +148,8 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
     private QueueOffsetSpec queueOffsetSpec;
     private boolean doubleBuffer;
     private Function<SingleChronicleQueue, Condition> createAppenderConditionCreator;
+    private long forceDirectoryListingRefreshIntervalMs = 60_000;
+    private AppenderListener appenderListener;
 
     protected SingleChronicleQueueBuilder() {
     }
@@ -269,16 +266,16 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
         return wireStore;
     }
 
-    private static boolean isQueueReplicationAvailable() {
+    static boolean isQueueReplicationAvailable() {
         return ENTERPRISE_QUEUE_CONSTRUCTOR != null;
     }
 
     private static RollCycle loadDefaultRollCycle() {
-        if (null == System.getProperty(QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY)) {
+        String rollCycleProperty = Jvm.getProperty(QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY);
+        if (null == rollCycleProperty) {
             return RollCycles.DEFAULT;
         }
 
-        String rollCycleProperty = System.getProperty(QueueSystemProperties.DEFAULT_ROLL_CYCLE_PROPERTY);
         String[] rollCyclePropertyParts = rollCycleProperty.split(":");
         if (rollCyclePropertyParts.length > 0) {
             try {
@@ -324,6 +321,13 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
     public SingleChronicleQueue build() {
         boolean needEnterprise = checkEnterpriseFeaturesRequested();
         preBuild();
+        if (Boolean.TRUE.equals(useSparseFiles) && sparseCapacity == null &&
+                (rollCycle == null || rollCycle.lengthInMillis() > 60_000)) {
+            RollCycle rc = rollCycle == null ? RollCycles.FAST_DAILY : rollCycle;
+            final long msgs = rc.maxMessagesPerCycle();
+            sparseCapacity = Math.min(512L << 30, Math.max(4L << 30, msgs * 128));
+            useSparseFiles = true;
+        }
 
         SingleChronicleQueue chronicleQueue;
         if (needEnterprise)
@@ -394,17 +398,17 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
         return this;
     }
 
-    public Updater<Bytes> messageInitializer() {
+    public Updater<Bytes<?>> messageInitializer() {
         return messageInitializer == null ? Bytes::clear : messageInitializer;
     }
 
-    public Consumer<Bytes> messageHeaderReader() {
+    public Consumer<Bytes<?>> messageHeaderReader() {
         return messageHeaderReader == null ? b -> {
         } : messageHeaderReader;
     }
 
-    public SingleChronicleQueueBuilder messageHeader(Updater<Bytes> messageInitializer,
-                                                     Consumer<Bytes> messageHeaderReader) {
+    public SingleChronicleQueueBuilder messageHeader(Updater<Bytes<?>> messageInitializer,
+                                                     Consumer<Bytes<?>> messageHeaderReader) {
         this.messageInitializer = messageInitializer;
         this.messageHeaderReader = messageHeaderReader;
         return this;
@@ -459,7 +463,10 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
             // readonly=true and file doesn't exist
             if (OS.isWindows())
                 throw ex; // we cant have a read-only table store on windows so we have no option but to throw the ex.
-            Jvm.warn().on(getClass(), "Failback to readonly tablestore", ex);
+            if (ex.getMessage().equals("Metadata file not found in readOnly mode"))
+                Jvm.warn().on(getClass(), "Failback to readonly tablestore " + ex);
+            else
+                Jvm.warn().on(getClass(), "Failback to readonly tablestore", ex);
             metaStore = new ReadonlyTableStore<>(metadata);
         }
     }
@@ -511,15 +518,6 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
             path.mkdirs();
         }
         return storeFilePath;
-    }
-
-    /**
-     * @deprecated To be removed in .22
-     */
-    @Deprecated
-    @NotNull
-    QueueLock queueLock() {
-        return isQueueReplicationAvailable() && !readOnly() ? new TSQueueLock(metaStore, pauserSupplier(), timeoutMS() * 3 / 2) : new NoopQueueLock();
     }
 
     @NotNull
@@ -587,7 +585,10 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
 
     /**
      * Creator for BytesStore for underlying ring buffer. Allows visibility of RB's data to be controlled.
-     * See also EnterpriseSingleChronicleQueue.RB_BYTES_STORE_CREATOR_NATIVE, EnterpriseSingleChronicleQueue.RB_BYTES_STORE_CREATOR_MAPPED_FILE
+     * See also EnterpriseSingleChronicleQueue.RB_BYTES_STORE_CREATOR_NATIVE, EnterpriseSingleChronicleQueue.RB_BYTES_STORE_CREATOR_MAPPED_FILE.
+     * <p>
+     * If you are using more than one {@link ChronicleQueue} object to access the ring buffer'd queue then you
+     * will need to set this. If this is not set then each queue will create its own in-memory ring buffer
      *
      * @return bufferBytesStoreCreator
      */
@@ -670,6 +671,31 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
         // can add an index2index & an index in one go.
         long minSize = Math.max(QueueUtil.testBlockSize(), 32L * indexCount());
         return Math.max(minSize, bs);
+    }
+
+    public SingleChronicleQueueBuilder useSparseFiles(boolean useSparseFiles) {
+        if (useSparseFiles && OS.isLinux() && OS.is64Bit())
+            this.useSparseFiles = useSparseFiles;
+        if (!useSparseFiles)
+            this.useSparseFiles = useSparseFiles;
+        return this;
+    }
+
+    public SingleChronicleQueueBuilder sparseCapacity(long sparseCapacity) {
+        this.sparseCapacity = sparseCapacity;
+        return this;
+    }
+
+    public long sparseCapacity() {
+        long bs = sparseCapacity == null ? DEFAULT_SPARSE_CAPACITY : sparseCapacity;
+
+        // can add an index2index & an index in one go.
+        long minSize = Math.max(QueueUtil.testBlockSize(), 64L * indexCount());
+        return Math.max(minSize, bs);
+    }
+
+    public boolean useSparseFiles() {
+        return OS.isLinux() && OS.is64Bit() && sparseCapacity != null;
     }
 
     /**
@@ -756,7 +782,7 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
      * GMT
      */
     public long epoch() {
-        return epoch == null ? Long.getLong(QueueSystemProperties.DEFAULT_EPOCH_PROPERTY, 0L) : epoch;
+        return epoch == null ? Jvm.getLong(QueueSystemProperties.DEFAULT_EPOCH_PROPERTY, 0L) : epoch;
     }
 
     /**
@@ -771,15 +797,6 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
     public SingleChronicleQueueBuilder buffered(boolean isBuffered) {
         this.writeBufferMode = isBuffered ? BufferMode.Asynchronous : BufferMode.None;
         return this;
-    }
-
-    /**
-     * @return if we uses a ring buffer to buffer the appends, the Excerpts are written to the
-     * Chronicle Queue using a background thread
-     */
-    @Deprecated(/* to be removed in x.22 */)
-    public boolean buffered() {
-        return this.writeBufferMode == BufferMode.Asynchronous;
     }
 
     /**
@@ -927,11 +944,6 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
         return ringBufferPauserSupplier == null ? Pauser::busy : ringBufferPauserSupplier;
     }
 
-    @Deprecated(/* to be removed in x.22 */)
-    public SingleChronicleQueueBuilder ringBufferPauser(Pauser ringBufferPauser) {
-        return ringBufferPauserSupplier(() -> ringBufferPauser);
-    }
-
     public SingleChronicleQueueBuilder ringBufferPauserSupplier(Supplier<Pauser> ringBufferPauserSupplier) {
         this.ringBufferPauserSupplier = ringBufferPauserSupplier;
         return this;
@@ -989,12 +1001,7 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
     }
 
     public StoreFileListener storeFileListener() {
-        return storeFileListener == null ?
-                (cycle, file) -> {
-                    if (Jvm.isDebugEnabled(getClass()))
-                        Jvm.debug().on(getClass(), "File released " + file);
-                } : storeFileListener;
-
+        return storeFileListener == null ? StoreFileListeners.DEBUG : storeFileListener;
     }
 
     public SingleChronicleQueueBuilder sourceId(int sourceId) {
@@ -1049,17 +1056,17 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
         return this;
     }
 
-    public Supplier<BiConsumer<BytesStore, Bytes>> encodingSupplier() {
+    public Supplier<BiConsumer<BytesStore, Bytes<?>>> encodingSupplier() {
         return encodingSupplier;
     }
 
-    public Supplier<BiConsumer<BytesStore, Bytes>> decodingSupplier() {
+    public Supplier<BiConsumer<BytesStore, Bytes<?>>> decodingSupplier() {
         return decodingSupplier;
     }
 
     public SingleChronicleQueueBuilder codingSuppliers(@Nullable
-                                                               Supplier<BiConsumer<BytesStore, Bytes>> encodingSupplier,
-                                                       @Nullable Supplier<BiConsumer<BytesStore, Bytes>> decodingSupplier) {
+                                                               Supplier<BiConsumer<BytesStore, Bytes<?>>> encodingSupplier,
+                                                       @Nullable Supplier<BiConsumer<BytesStore, Bytes<?>>> decodingSupplier) {
         if ((encodingSupplier == null) != (decodingSupplier == null))
             throw new UnsupportedOperationException("Both encodingSupplier and decodingSupplier must be set or neither");
         this.encodingSupplier = encodingSupplier;
@@ -1082,26 +1089,6 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
             rollTime(rollTime, rollTimeZone);
     }
 
-    /**
-     * @param strongAppenders strongAppenders
-     * @return this
-     * @deprecated appenders are now always strongly referenced
-     */
-    @Deprecated(/* to be removed in x.23 */)
-    public SingleChronicleQueueBuilder strongAppenders(boolean strongAppenders) {
-        this.strongAppenders = strongAppenders;
-        return this;
-    }
-
-    /**
-     * @return strongAppenders
-     * @deprecated appenders are now always strongly referenced
-     */
-    @Deprecated(/* to be removed in x.23 */)
-    public boolean strongAppenders() {
-        return Boolean.TRUE.equals(strongAppenders);
-    }
-
     // *************************************************************************
     //
     // *************************************************************************
@@ -1116,6 +1103,15 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
 
     public SingleChronicleQueueBuilder checkInterrupts(boolean checkInterrupts) {
         this.checkInterrupts = checkInterrupts;
+        return this;
+    }
+
+    public long forceDirectoryListingRefreshIntervalMs() {
+        return forceDirectoryListingRefreshIntervalMs;
+    }
+
+    public SingleChronicleQueueBuilder forceDirectoryListingRefreshIntervalMs(long forceDirectoryListingRefreshIntervalMs) {
+        this.forceDirectoryListingRefreshIntervalMs = forceDirectoryListingRefreshIntervalMs;
         return this;
     }
 
@@ -1157,6 +1153,23 @@ public class SingleChronicleQueueBuilder extends SelfDescribingMarshallable impl
 
     public WriteLock appendLock() {
         return readOnly() ? WriteLock.NO_OP : new TableStoreWriteLock(metaStore, pauserSupplier(), timeoutMS() * 3 / 2, TableStoreWriteLock.APPEND_LOCK_KEY);
+    }
+
+    /**
+     * Set an AppenderListener which is called when an Excerpt is actually written.
+     * This is called while the writeLock is still held, after the messages has been written.
+     * For asynchronous writes, this is called in the background thread.
+     *
+     * @param appenderListener to call
+     * @return this
+     */
+    public SingleChronicleQueueBuilder appenderListener(AppenderListener appenderListener) {
+        this.appenderListener = appenderListener;
+        return this;
+    }
+
+    public AppenderListener appenderListener() {
+        return appenderListener;
     }
 
     enum DefaultPauserSupplier implements Supplier<TimingPauser> {

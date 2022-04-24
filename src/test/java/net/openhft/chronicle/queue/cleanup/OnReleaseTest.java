@@ -1,14 +1,12 @@
 package net.openhft.chronicle.queue.cleanup;
 
-import net.openhft.chronicle.core.FlakyTestRunner;
 import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.io.BackgroundResourceReleaser;
 import net.openhft.chronicle.core.time.SetTimeProvider;
 import net.openhft.chronicle.core.util.Time;
-import net.openhft.chronicle.queue.ChronicleQueue;
-import net.openhft.chronicle.queue.ExcerptAppender;
-import net.openhft.chronicle.queue.ExcerptTailer;
-import net.openhft.chronicle.queue.RollCycles;
+import net.openhft.chronicle.queue.*;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.testframework.FlakyTestRunner;
 import org.junit.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -16,10 +14,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
-public class OnReleaseTest {
+public class OnReleaseTest extends QueueTestCommon {
     @Test
-    public void onRelease() {
-        FlakyTestRunner.run(this::onRelease0);
+    public void onRelease() throws Throwable {
+        FlakyTestRunner.builder(this::onRelease0).build().run();
     }
 
     public void onRelease0() {
@@ -32,7 +30,7 @@ public class OnReleaseTest {
                 .rollCycle(RollCycles.MINUTELY)
                 .timeProvider(stp)
                 .storeFileListener((c, f) -> {
-                    // System.out.println("write released " + f);
+                    System.out.println("write released " + f);
                     writeRoll.incrementAndGet();
                 })
                 .build();
@@ -41,7 +39,7 @@ public class OnReleaseTest {
                      .rollCycle(RollCycles.MINUTELY)
                      .timeProvider(stp)
                      .storeFileListener((c, f) -> {
-                         // System.out.println("read released " + f);
+                         System.out.println("read released " + f);
                          readRoll.incrementAndGet();
                      })
                      .build()) {
@@ -50,6 +48,7 @@ public class OnReleaseTest {
             for (int i = 0; i < 500; i++) {
                 appender.writeText("hello-" + i);
                 assertNotNull(tailer.readText());
+                BackgroundResourceReleaser.releasePendingResources();
                 assertEquals(i, writeRoll.get());
                 assertEquals(i, readRoll.get());
                 stp.advanceMillis(66_000);

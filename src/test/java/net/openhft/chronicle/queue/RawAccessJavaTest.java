@@ -9,7 +9,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 
 // For use with C++ RawAccessJava. Called from C++
-public class RawAccessJavaTest {
+public class RawAccessJavaTest extends QueueTestCommon {
 
     final long QUEUE_HEADER_SIZE = 4;
     final long RAW_SIZE_PREFIX = 4;
@@ -36,7 +36,7 @@ public class RawAccessJavaTest {
             for (int i = 0; i < COUNT; ++i) {
                 try (DocumentContext dc = tailer.readingDocument()) {
 
-                    Bytes bytes = dc.wire().bytes();
+                    Bytes<?> bytes = dc.wire().bytes();
 
                     bytes.readSkip(-QUEUE_HEADER_SIZE);
                     int header = bytes.readInt();
@@ -78,7 +78,7 @@ public class RawAccessJavaTest {
             for (int i = 0; i < COUNT; ++i) {
                 try (DocumentContext dc = appender.writingDocument()) {
 
-                    Bytes bytes = dc.wire().bytes();
+                    Bytes<?> bytes = dc.wire().bytes();
 
                     // will contain the size of the blob
                     long start = bytes.writePosition();

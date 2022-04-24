@@ -21,7 +21,6 @@ import net.openhft.chronicle.core.io.Closeable;
 import net.openhft.chronicle.core.time.TimeProvider;
 import net.openhft.chronicle.core.values.LongValue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
-import net.openhft.chronicle.queue.util.QueueUtil;
 import net.openhft.chronicle.wire.BinaryMethodWriterInvocationHandler;
 import net.openhft.chronicle.wire.VanillaMethodWriterBuilder;
 import net.openhft.chronicle.wire.WireType;
@@ -64,9 +63,6 @@ import java.util.stream.Stream;
  * @author peter.lawrey
  */
 public interface ChronicleQueue extends Closeable {
-
-    @Deprecated /* For removal in x.22, use QueueUtil.testBlockSize instead */
-    int TEST_BLOCK_SIZE = QueueUtil.testBlockSize();
 
     /**
      * Creates and returns a new {@link ChronicleQueue} that will be backed by
@@ -414,7 +410,7 @@ public interface ChronicleQueue extends Closeable {
     void lastAcknowledgedIndexReplicated(long lastAcknowledgedIndexReplicated);
 
     /**
-     * Refreshed this ChronicleQueue's view of the directory used for storing files.
+     * Refreshes this ChronicleQueue's view of the directory used for storing files.
      * <p>
      * Invoke this method if you delete file from a chronicle-queue directory
      * <p>

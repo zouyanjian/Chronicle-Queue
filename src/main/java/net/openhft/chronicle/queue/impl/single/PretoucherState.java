@@ -9,8 +9,8 @@ import java.io.File;
 import java.util.function.LongSupplier;
 
 class PretoucherState {
-    private static final int HEAD_ROOM = Integer.getInteger("PretoucherState.headRoom", 1 << 20);
     public static final int FACTOR = 4;
+    private static final int HEAD_ROOM = Jvm.getInteger("PretoucherState.headRoom", 1 << 20);
     @NotNull
     private final LongSupplier posSupplier;
     private int minHeadRoom;
@@ -66,10 +66,40 @@ class PretoucherState {
                 Thread thread = Thread.currentThread();
                 int count = 0, pretouch = 0;
                 for (; lastTouchedPage < neededEnd; lastTouchedPage += pageSize) {
+                    // null bytes is used when testing.
+                    if (bytes != null)
+                        bytes.throwExceptionIfClosed();
                     if (thread.isInterrupted())
                         break;
-                    if (touchPage(bytes, lastTouchedPage))
-                        pretouch++;
+                    final long realCapacity = bytes == null ? 0 : bytes.realCapacity();
+                    long capacity = 0;
+                    try {
+                        capacity = bytes == null ? -1 : bytes.bytesStore().capacity();
+                    } catch (ClassCastException e) {
+                        // ignored.
+                    }
+                    long safeLimit = 0;
+                    try {
+                        safeLimit = bytes == null ? -1 : bytes.bytesStore().safeLimit();
+                    } catch (ClassCastException e) {
+                        // ignored.
+                    }
+                    try {
+                        if (touchPage(bytes, lastTouchedPage)) {
+                            // spurious call to a native method to detect an internal error.
+                            Thread.yield();
+                            pretouch++;
+                        }
+                    } catch (Throwable t) {
+                        try {
+                            bytes.throwExceptionIfClosed();
+                            bytes.throwExceptionIfReleased();
+                            throw new IllegalStateException("bytes.realCapacity: " + realCapacity + ", bytes:capacity: " + capacity + ", bytes:safeLimit: " + safeLimit + ", lastTouchedPage: " + lastTouchedPage);
+                        } catch (Exception e) {
+                            e.initCause(t);
+                            throw e;
+                        }
+                    }
                     count++;
                 }
                 onTouched(count);
@@ -98,7 +128,8 @@ class PretoucherState {
     }
 
     protected boolean touchPage(MappedBytes bytes, long offset) {
-        return bytes != null && bytes.compareAndSwapLong(offset, 0L, 0L);
+        return false;
+//        return bytes != null && bytes.compareAndSwapLong(offset, 0L, 0L);
     }
 
     protected void onTouched(int count) {

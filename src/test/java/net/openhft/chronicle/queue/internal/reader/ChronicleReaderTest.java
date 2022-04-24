@@ -1,12 +1,17 @@
 package net.openhft.chronicle.queue.internal.reader;
 
+import net.openhft.chronicle.bytes.MethodReader;
 import net.openhft.chronicle.core.Jvm;
 import net.openhft.chronicle.core.OS;
+import net.openhft.chronicle.core.io.BackgroundResourceReleaser;
+import net.openhft.chronicle.core.time.SetTimeProvider;
 import net.openhft.chronicle.queue.*;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.queue.impl.table.SingleTableStore;
 import net.openhft.chronicle.queue.reader.ChronicleReader;
+import net.openhft.chronicle.queue.reader.ContentBasedLimiter;
+import net.openhft.chronicle.queue.reader.Reader;
 import net.openhft.chronicle.threads.NamedThreadFactory;
 import net.openhft.chronicle.wire.*;
 import org.junit.After;
@@ -25,6 +30,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -255,7 +261,13 @@ public class ChronicleReaderTest extends ChronicleQueueTestBase {
                 showMessageHistory(true).
                 execute();
 
-        assertTrue(capturedOutput.stream().anyMatch(msg -> msg.contains("MessageHistory")));
+        String first = capturedOutput.poll();
+        assertTrue(first.startsWith("0x"));
+        String second = capturedOutput.poll();
+        assertTrue(second, second.matches("VanillaMessageHistory.sources: .. timings: .[0-9]+. addSourceDetails=false}" +
+                System.lineSeparator() +
+                "say: hello\n" +
+                "...\n"));
     }
 
     @Test(timeout = 5000)
@@ -444,6 +456,39 @@ public class ChronicleReaderTest extends ChronicleQueueTestBase {
                 .collect(Collectors.toList());
         assertEquals(3, matchedMessages.size());
         assertTrue(matchedMessages.stream().allMatch(s -> s.contains("goodbye")));
+    }
+
+    @Test
+    public void shouldStopReadingWhenContentBasedLimitHasBeenReached() {
+        AtomicInteger helloCount = new AtomicInteger();
+        AtomicInteger goodbyeCount = new AtomicInteger();
+        final Say say = msg -> {
+            if ("hello".equals(msg)) {
+                helloCount.incrementAndGet();
+            }
+            if ("goodbye".equals(msg)) {
+                goodbyeCount.incrementAndGet();
+            }
+        };
+        final ContentBasedLimiter cbl = new ContentBasedLimiter() {
+
+            private int limit = -1;
+
+            @Override
+            public boolean shouldHaltReading(DocumentContext dc) {
+                dc.wire().bytes().readSkip(-4); // skip back to the start of the document context (this feels a tad horrid)
+                final MethodReader methodReader = dc.wire().methodReader(say);
+                methodReader.readOne();
+                return helloCount.get() > limit;
+            }
+
+            @Override
+            public void configure(Reader reader) {
+                limit = Integer.parseInt(reader.limiterArg());
+            }
+        };
+        basicReader().withContentBasedLimiter(cbl).withLimiterArg("4").execute();
+        assertEquals(4, capturedOutput.stream().filter(msg -> msg.contains("hello")).count());
     }
 
     private void assertTimesAreInZone(File queueDir, ZoneId zoneId, List<Long> timestamps) {
@@ -753,14 +798,64 @@ public class ChronicleReaderTest extends ChronicleQueueTestBase {
         }
     }
 
+    @Test
+    public void findByBinarySearchWithDeletedRollCyles() {
+        final File queueDir = getTmpDir();
+        final SetTimeProvider timeProvider = new SetTimeProvider();
+        try (final SingleChronicleQueue queue = SingleChronicleQueueBuilder.binary(queueDir)
+                .timeProvider(timeProvider)
+                .rollCycle(RollCycles.TEST_SECONDLY)
+                .build()) {
+
+            for (int i = 0; i < 5; i++) {
+                int entries = 10, reps = 5;
+                populateQueueWithTimestamps(queue, entries, reps, i);
+                timeProvider.advanceMillis(3_000);
+            }
+        }
+        // Just make sure Windows has closed all the files before we try to delete
+        BackgroundResourceReleaser.releasePendingResources();
+
+        // delete the 4th roll cycle
+        assertTrue("Couldn't delete cycle, test is broken", queueDir.toPath().resolve("19700101-000009T.cq4").toFile().delete());
+
+        // this should be before the start
+        long tsToLookFor = getTimestampAtIndex(22); // third index in 3rd roll cycle, should be ({reps=5} * 8) + ({remaining_cycles=1} * ({reps=5} * {entries=10})) = 90 in output
+        System.out.println(tsToLookFor);
+        ChronicleReader reader = new ChronicleReader()
+                .withArg(ServicesTimestampLongConverter.INSTANCE.asString(tsToLookFor))
+                .withBinarySearch(TimestampComparator.class.getCanonicalName())
+                .withBasePath(queueDir.toPath())
+                .withMessageSink(capturedOutput::add);
+        reader.execute();
+        assertEquals(90 * 2, capturedOutput.size());
+    }
+
+    @Test
+    public void shouldRespectWireType() {
+        basicReader().
+                asMethodReader(Say.class.getName()).
+                withWireType(WireType.JSON).
+                execute();
+
+        capturedOutput.poll();
+        assertEquals("\"say\":\"hello\"\n",
+                capturedOutput.poll());
+    }
+
     private void populateQueueWithTimestamps(SingleChronicleQueue queue, int entries, int repeatsPerEntry) {
+        populateQueueWithTimestamps(queue, entries, repeatsPerEntry, 0);
+    }
+
+    private void populateQueueWithTimestamps(SingleChronicleQueue queue, int entries, int repeatsPerEntry, int batch) {
         try (ExcerptAppender appender = queue.acquireAppender()) {
             for (int i = 0; i < entries; i++) {
+                int effectiveIndex = i + (entries * batch);
                 // write multiple so we can confirm that binary search finds the 1st
                 for (int j = 0; j < repeatsPerEntry; j++) {
-                    final long timestampAtIndex = getTimestampAtIndex(i);
+                    final long timestampAtIndex = getTimestampAtIndex(effectiveIndex);
                     writeTimestamp(appender, timestampAtIndex);
-                    System.out.printf("%s:%s -- %s%n", (i * repeatsPerEntry) + j, appender.lastIndexAppended(), timestampAtIndex);
+                    System.out.printf("%s:%s -- %s%n", (effectiveIndex * repeatsPerEntry) + j, Long.toHexString(appender.lastIndexAppended()), timestampAtIndex);
                 }
             }
         }

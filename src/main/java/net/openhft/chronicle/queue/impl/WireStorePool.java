@@ -17,7 +17,7 @@
  */
 package net.openhft.chronicle.queue.impl;
 
-import net.openhft.chronicle.core.io.Closeable;
+import net.openhft.chronicle.core.io.BackgroundResourceReleaser;
 import net.openhft.chronicle.core.io.SimpleCloseable;
 import net.openhft.chronicle.queue.TailerDirection;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueStore;
@@ -53,7 +53,8 @@ public class WireStorePool extends SimpleCloseable {
         SingleChronicleQueueStore store = this.supplier.acquire(cycle, createIfAbsent);
         if (store != null) {
             if (store != oldStore) {
-                storeFileListener.onAcquired(cycle, store.file());
+                if (storeFileListener.isActive())
+                    BackgroundResourceReleaser.run(() -> storeFileListener.onAcquired(cycle, store.file()));
                 store.cycle(cycle);
             }
         }
@@ -67,9 +68,9 @@ public class WireStorePool extends SimpleCloseable {
     }
 
     public void closeStore(@NotNull SingleChronicleQueueStore store) {
-        Closeable.closeQuietly(store);
-
-        storeFileListener.onReleased(store.cycle(), store.file());
+        BackgroundResourceReleaser.release(store);
+        if (storeFileListener.isActive())
+            BackgroundResourceReleaser.run(() -> storeFileListener.onReleased(store.cycle(), store.file()));
     }
 
     /**

@@ -25,6 +25,7 @@ import net.openhft.chronicle.core.analytics.AnalyticsFacade;
 import net.openhft.chronicle.core.annotation.PackageLocal;
 import net.openhft.chronicle.core.announcer.Announcer;
 import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.BackgroundResourceReleaser;
 import net.openhft.chronicle.core.io.Closeable;
 import net.openhft.chronicle.core.threads.*;
 import net.openhft.chronicle.core.time.TimeProvider;
@@ -60,6 +61,7 @@ import static java.util.Collections.singletonMap;
 import static net.openhft.chronicle.core.io.Closeable.closeQuietly;
 import static net.openhft.chronicle.queue.TailerDirection.BACKWARD;
 import static net.openhft.chronicle.queue.TailerDirection.NONE;
+import static net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder.isQueueReplicationAvailable;
 import static net.openhft.chronicle.wire.Wires.*;
 
 public class SingleChronicleQueue extends AbstractCloseable implements RollingChronicleQueue {
@@ -69,6 +71,8 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     public static final String DISK_SPACE_CHECKER_NAME = DiskSpaceMonitor.DISK_SPACE_CHECKER_NAME;
 
     private static final boolean SHOULD_CHECK_CYCLE = Jvm.getBoolean("chronicle.queue.checkrollcycle");
+    static final int WARN_SLOW_APPENDER_MS = Jvm.getInteger("chronicle.queue.warnSlowAppenderMs", 100);
+
     @NotNull
     protected final EventLoop eventLoop;
     @NotNull
@@ -122,10 +126,15 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     @NotNull
     private final RollCycle rollCycle;
     private final int deltaCheckpointInterval;
+    private final boolean useSparseFile;
+    private final long sparseCapacity;
+    final AppenderListener appenderListener;
     protected int sourceId;
     @NotNull
     private Condition createAppenderCondition = NoOpCondition.INSTANCE;
-    protected final ThreadLocal<ExcerptAppender> strongExcerptAppenderThreadLocal = CleaningThreadLocal.withCloseQuietly(this::newAppender);
+    protected final ThreadLocal<ExcerptAppender> strongExcerptAppenderThreadLocal = CleaningThreadLocal.withCloseQuietly(this::createNewAppenderOnceConditionIsMet);
+    private final long forceDirectoryListingRefreshIntervalMs;
+    private long[] chunkCount = {0};
 
     protected SingleChronicleQueue(@NotNull final SingleChronicleQueueBuilder builder) {
         try {
@@ -146,6 +155,8 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
             wireType = builder.wireType();
             blockSize = builder.blockSize();
             overlapSize = Math.max(64 << 10, builder.blockSize() / 4);
+            useSparseFile = builder.useSparseFiles();
+            sparseCapacity = builder.sparseCapacity();
             eventLoop = builder.eventLoop();
             bufferCapacity = builder.bufferCapacity();
             onRingBufferStats = builder.onRingBufferStats();
@@ -158,23 +169,26 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
             storeFactory = builder.storeFactory();
             checkInterrupts = builder.checkInterrupts();
             metaStore = builder.metaStore();
-            doubleBuffer = false; //builder.doubleBuffer();
+            doubleBuffer = builder.doubleBuffer();
             if (metaStore.readOnly() && !builder.readOnly()) {
                 Jvm.warn().on(getClass(), "Forcing queue to be readOnly file=" + path);
                 // need to set this on builder as it is used elsewhere
                 builder.readOnly(metaStore.readOnly());
             }
             readOnly = builder.readOnly();
+            appenderListener = builder.appenderListener();
 
             if (readOnly) {
-                this.directoryListing = new FileSystemDirectoryListing(path, fileToCycleFunction());
+                this.directoryListing = new FileSystemDirectoryListing(path, fileNameToCycleFunction());
             } else {
-                this.directoryListing = new TableDirectoryListing(metaStore, path.toPath(), fileToCycleFunction(), false);
+                this.directoryListing = new TableDirectoryListing(metaStore, path.toPath(), fileNameToCycleFunction());
                 directoryListing.init();
             }
 
             this.directoryListing.refresh(true);
-            this.queueLock = builder.queueLock();
+            this.queueLock = isQueueReplicationAvailable() && !builder.readOnly()
+                    ? new TSQueueLock(metaStore, builder.pauserSupplier(), builder.timeoutMS() * 3 / 2)
+                    : new NoopQueueLock();
             this.writeLock = builder.writeLock();
 
             // release the write lock if the process is dead
@@ -193,12 +207,13 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
             }
 
             this.deltaCheckpointInterval = builder.deltaCheckpointInterval();
+            this.forceDirectoryListingRefreshIntervalMs = builder.forceDirectoryListingRefreshIntervalMs();
 
             sourceId = builder.sourceId();
 
             Announcer.announce("net.openhft", "chronicle-queue",
                     AnalyticsFacade.isEnabled()
-                            ? singletonMap("Analytics", "Chronicle Queue reports usage statistics. Learn more or turn off: https://github.com/OpenHFT/Chronicle-Queue/blob/master/DISCLAIMER.adoc")
+                            ? singletonMap("Analytics", "Chronicle Queue reports usage statistics. Learn more or turn off: https://github.com/OpenHFT/Chronicle-Queue/blob/ea/DISCLAIMER.adoc")
                             : emptyMap());
 
             final Map<String, String> additionalEventParameters = AnalyticsFacade.standardAdditionalProperties();
@@ -208,6 +223,8 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                 additionalEventParameters.put("roll_cycle", rollCycleName);
 
             AnalyticsHolder.instance().sendEvent("started", additionalEventParameters);
+
+            disableThreadSafetyCheck(true);
         } catch (Throwable t) {
             close();
             throw Jvm.rethrow(t);
@@ -284,7 +301,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     }
 
     /**
-     * when using replication to another host, this is the maxiumum last index that has been sent to any of the remote host(s).
+     * when using replication to another host, this is the maximum last index that has been sent to any of the remote host(s).
      */
     @Override
     public long lastIndexReplicated() {
@@ -350,7 +367,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                         return;
                     }
                 }
-                Bytes bytes = acquireBytes();
+                Bytes<?> bytes = acquireBytes();
                 TextWire text = new TextWire(bytes);
                 while (true) {
                     try (DocumentContext dc = tailer.readingDocument()) {
@@ -385,6 +402,11 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                 Jvm.debug().on(SingleChronicleQueue.class, e);
             }
         }
+    }
+
+    // Used in testing.
+    public long chunkCount() {
+        return chunkCount[0];
     }
 
     @Override
@@ -425,14 +447,35 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
         return this.eventLoop;
     }
 
+    /**
+     * Construct a new {@link ExcerptAppender} once the {@link #createAppenderCondition} is met.
+     * <p>
+     * This should be called by any sub-classes that require an appender but don't want to use
+     * the thread-local one that can be acquired via {@link #acquireAppender()}
+     *
+     * @return The new appender
+     */
     @NotNull
-    protected ExcerptAppender newAppender() {
+    protected ExcerptAppender createNewAppenderOnceConditionIsMet() {
         try {
             createAppenderCondition.await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new InterruptedRuntimeException("Interrupted waiting for condition to create appender", e);
         }
+        return constructAppender();
+    }
+
+    /**
+     * Construct a new {@link ExcerptAppender}.
+     * <p>
+     * This is protected so sub-classes can override the creation of an appender,
+     * to create a new appender, sub-classes should call {@link #createNewAppenderOnceConditionIsMet()}
+     *
+     * @return The new appender
+     */
+    @NotNull
+    protected ExcerptAppender constructAppender() {
         final WireStorePool newPool = WireStorePool.withSupplier(storeSupplier, storeFileListener);
         return new StoreAppender(this, newPool, checkInterrupts);
     }
@@ -456,7 +499,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
         ExcerptAppender res = strongExcerptAppenderThreadLocal.get();
 
         if (res.isClosing())
-            strongExcerptAppenderThreadLocal.set(res = newAppender());
+            strongExcerptAppenderThreadLocal.set(res = createNewAppenderOnceConditionIsMet());
 
         return res;
     }
@@ -469,7 +512,6 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
      * <p>
      * Queue locks have no impact if you are not using queue replication because the are implemented as a no-op.
      */
-    @Override
     @NotNull
     public QueueLock queueLock() {
         return queueLock;
@@ -478,6 +520,9 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     /**
      * @return the {@link WriteLock} that is used to lock writes to the queue. This is the mechanism used to
      * coordinate writes from multiple threads and processes.
+     * <p>This lock should only be held for a short time, as it will block progress of any writers to
+     * this queue. The default behaviour of {@link TableStoreWriteLock} is to override the lock after a timeout.
+     *
      * <p>This is also used to protect rolling to the next cycle
      */
     @NotNull
@@ -534,16 +579,34 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
         return pool.nextCycle(cycle, direction);
     }
 
-    public long exceptsPerCycle(int cycle) {
+    /**
+     * Returns a number of excerpts in a cycle. May use a fast path to return the cycle length cached in indexing,
+     * which is updated last during append operation so may be possible that a single entry is available for reading
+     * but not acknowledged by this method yet.
+     */
+    public long approximateExcerptsInCycle(int cycle) {
         throwExceptionIfClosed();
         // TODO: this function may require some re-work now that acquireTailer has been deprecated
         StoreTailer tailer = acquireTailer();
         try {
-            if (tailer.moveToCycle(cycle)) {
-                return tailer.store.lastSequenceNumber(tailer) + 1;
-            } else {
-                return -1;
-            }
+            return tailer.moveToCycle(cycle) ? tailer.store.approximateLastSequenceNumber(tailer) + 1 : -1;
+        } catch (StreamCorruptedException e) {
+            throw new IllegalStateException(e);
+        } finally {
+            tailer.releaseStore();
+        }
+    }
+
+    /**
+     * Returns an exact number of excerpts in a cycle available for reading. This may be a computationally
+     * expensive operation.
+     */
+    public long exactExcerptsInCycle(int cycle) {
+        throwExceptionIfClosed();
+        // TODO: this function may require some re-work now that acquireTailer has been deprecated
+        StoreTailer tailer = acquireTailer();
+        try {
+            return tailer.moveToCycle(cycle) ? tailer.store.exactLastSequenceNumber(tailer) + 1 : -1;
         } catch (StreamCorruptedException e) {
             throw new IllegalStateException(e);
         } finally {
@@ -601,7 +664,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
         long lowerSeqNum = rollCycle.toSequenceNumber(fromIndex);
 
         if (lowerCycle + 1 == upperCycle) {
-            long l = exceptsPerCycle(lowerCycle);
+            long l = exactExcerptsInCycle(lowerCycle);
             result += (l - lowerSeqNum) + upperSeqNum;
             return result;
         }
@@ -616,7 +679,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
         if (cycles.first() == lowerCycle) {
             // because we are inclusive, for example  if we were at the end, then this
             // is 1 except rather than zero
-            long l = exceptsPerCycle(lowerCycle);
+            long l = exactExcerptsInCycle(lowerCycle);
             result += (l - lowerSeqNum);
         } else
             throw new IllegalStateException("Cycle not found, lower-cycle=" + Long.toHexString(lowerCycle));
@@ -631,7 +694,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
 
         final long[] array = cycles.stream().mapToLong(i -> i).toArray();
         for (int i = 1; i < array.length - 1; i++) {
-            long x = exceptsPerCycle(Math.toIntExact(array[i]));
+            long x = exactExcerptsInCycle(Math.toIntExact(array[i]));
             result += x;
         }
 
@@ -753,7 +816,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
             return;
         }
 
-        boolean force = now - directoryListing.lastRefreshTimeMS() > 60_000;
+        boolean force = now - directoryListing.lastRefreshTimeMS() > forceDirectoryListingRefreshIntervalMs;
         directoryListing.refresh(force);
     }
 
@@ -776,10 +839,6 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     public int lastCycle() {
         setFirstAndLastCycle();
         return directoryListing.getMaxCreatedCycle();
-    }
-
-    protected int fileToCycle(final File queueFile) {
-        return fileToCycleFunction().applyAsInt(queueFile);
     }
 
     @NotNull
@@ -814,7 +873,9 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     MappedFile mappedFile(File file) throws FileNotFoundException {
         long chunkSize = OS.pageAlign(blockSize);
         long overlapSize = OS.pageAlign(blockSize / 4);
-        return MappedFile.of(file, chunkSize, overlapSize, readOnly);
+        return useSparseFile
+                ? MappedFile.ofSingle(file, sparseCapacity, readOnly)
+                : MappedFile.of(file, chunkSize, overlapSize, readOnly);
     }
 
     boolean isReadOnly() {
@@ -836,11 +897,8 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
     }
 
     @NotNull
-    private ToIntFunction<File> fileToCycleFunction() {
-        return f -> {
-            final String name = f.getName();
-            return dateCache.parseCount(name.substring(0, name.length() - SUFFIX.length()));
-        };
+    private ToIntFunction<String> fileNameToCycleFunction() {
+        return name -> dateCache.parseCount(name.substring(0, name.length() - SUFFIX.length()));
     }
 
     void removeCloseListener(final StoreTailer storeTailer) {
@@ -855,8 +913,10 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
 
     void cleanupStoreFilesWithNoData() {
 
+        long start = System.nanoTime();
         writeLock.lock();
 
+        Runnable fireOnReleasedEvent = null;
         try {
             int cycle = cycle();
             for (int lastCycle = lastCycle(); lastCycle < cycle && lastCycle >= 0; lastCycle--) {
@@ -877,19 +937,19 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                         }
                         continue;
                     }
+                    fireOnReleasedEvent = () -> storeFileListener.onReleased(store.cycle(), store.file());
                     break;
                 }
             }
             directoryListing.refresh(true);
         } finally {
             writeLock.unlock();
+            if(fireOnReleasedEvent != null)
+                BackgroundResourceReleaser.run(fireOnReleasedEvent);
+            long tookMillis = (System.nanoTime() - start) / 1_000_000;
+            if (tookMillis > WARN_SLOW_APPENDER_MS)
+                Jvm.perf().on(getClass(), "Took " + tookMillis + "ms to cleanupStoreFilesWithNoData");
         }
-    }
-
-    @Override
-    protected boolean threadSafetyCheck(boolean isUsed) {
-        // component is thread safe
-        return true;
     }
 
     public void tableStorePut(CharSequence key, long index) {
@@ -953,6 +1013,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
             mappedFileCache = new ReferenceCountedCache<>(
                     MappedBytes::mappedBytes,
                     SingleChronicleQueue.this::mappedFile);
+            disableThreadSafetyCheck(true);
         }
 
         @SuppressWarnings("resource")
@@ -978,6 +1039,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                 if (createIfAbsent)
                     checkDiskSpace(that.path);
 
+                throwExceptionIfClosed();
                 if (createIfAbsent && !path.exists() && !dateValue.pathExists)
                     PrecreatedFiles.renamePreCreatedFileToRequiredFile(path);
 
@@ -989,6 +1051,8 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                     createFile(path);
                     mappedBytes = mappedFileCache.get(path);
                 }
+                mappedBytes.disableThreadSafetyCheck(true);
+                mappedBytes.chunkCount(chunkCount);
 
 //                pauseUnderload();
 
@@ -1140,10 +1204,9 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                 final NavigableMap<Long, File> tree = new TreeMap<>();
 
                 final File[] files = parentFile.listFiles((File file) -> file.getPath().endsWith(SUFFIX));
-
-                for (File file : files) {
-                    tree.put(dateCache.toLong(file), file);
-                }
+                if (files != null)
+                    for (File file : files)
+                        tree.put(dateCache.toLong(file), file);
 
                 cachedValue = new CachedCycleTree(directoryModCount, tree);
 
@@ -1192,7 +1255,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
 
                 if (!fileFound) {
                     directoryListing.refresh(true);
-                    throw new IllegalStateException(
+                    throw new MissingStoreFileException(
                             String.format("Expected file to exist for cycle: %d, file: %s.%nminCycle: %d, maxCycle: %d%n" +
                                             "Available files: %s",
                                     currentCycle, currentCycleFile,
@@ -1209,7 +1272,7 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
                 file = tree.get(key);
             }
             if (file == null) {
-                throw new AssertionError("missing currentCycle, file=" + currentCycleFile);
+                throw new MissingStoreFileException("missing currentCycle, file=" + currentCycleFile);
             }
 
             switch (direction) {
@@ -1252,12 +1315,6 @@ public class SingleChronicleQueue extends AbstractCloseable implements RollingCh
             if (!file.exists())
                 throw new IllegalStateException("'file not found' for the " + m + ", file=" + file);
             return dateCache.toLong(file);
-        }
-
-        @Override
-        protected boolean threadSafetyCheck(boolean isUsed) {
-            // StoreSupplier are thread safe
-            return true;
         }
     }
 }

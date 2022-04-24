@@ -2,17 +2,14 @@ package net.openhft.chronicle.queue.impl.single;
 
 import net.openhft.chronicle.bytes.Bytes;
 import net.openhft.chronicle.core.io.IOTools;
-import net.openhft.chronicle.queue.ChronicleQueue;
-import net.openhft.chronicle.queue.ExcerptAppender;
-import net.openhft.chronicle.queue.ExcerptTailer;
-import net.openhft.chronicle.queue.RollCycles;
+import net.openhft.chronicle.queue.*;
 import org.junit.Test;
 
 import java.io.File;
 
 import static org.junit.Assert.*;
 
-public class WriteBytesIndexTest {
+public class WriteBytesIndexTest extends QueueTestCommon {
     @Test
     public void writeMultipleAppenders() {
         File path = IOTools.createTempFile("writeMultipleAppenders");
@@ -26,8 +23,8 @@ public class WriteBytesIndexTest {
 
              ChronicleQueue q2 = createQueue(path)) {
 
-            Bytes bytes = Bytes.allocateElasticOnHeap();
-            Bytes bytes2 = Bytes.allocateElasticOnHeap();
+            Bytes<?> bytes = Bytes.allocateElasticOnHeap();
+            Bytes<?> bytes2 = Bytes.allocateElasticOnHeap();
             for (int cycle = 1; cycle < 10; cycle++) {
                 for (int seq = 0; seq < cycle; seq++) {
                     bytes.clear().append("Msg ").append(String.valueOf(cycle)).append(" ").append(String.valueOf(seq));

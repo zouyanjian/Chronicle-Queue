@@ -30,6 +30,8 @@ public interface RollCycle {
      *     <li>"yyyyMMdd-HHmm" (MINUTELY)</li>
      *     <li>"yyyyMMdd" (DAILY)</li>
      * </ul>
+     * Lexicographical order of formatted cycles must preserve chronological order, i.e. if {@code cycle1 < cycle2},
+     * the same relation must be kept for their string representations.
      *
      * @return the format that is to be applied when file names are calculated for a new roll cycle
      */
@@ -48,11 +50,6 @@ public interface RollCycle {
      * @return the length in milliseconds (i.e. the maximum duration) for a roll cycle
      */
     int lengthInMillis();
-
-    @Deprecated(/* to be removed in x.22 */)
-    default int length() {
-        return lengthInMillis();
-    }
 
     /**
      * @return the size of each index array, note: indexCount^2 is the maximum number of index queue entries.

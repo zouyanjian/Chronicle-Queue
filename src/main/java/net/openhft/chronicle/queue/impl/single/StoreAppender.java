@@ -1,11 +1,14 @@
 package net.openhft.chronicle.queue.impl.single;
 
-import net.openhft.chronicle.bytes.*;
-import net.openhft.chronicle.bytes.internal.NativeBytesStore;
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.BytesStore;
+import net.openhft.chronicle.bytes.MappedBytes;
+import net.openhft.chronicle.bytes.WriteBytesMarshallable;
 import net.openhft.chronicle.core.Jvm;
 import net.openhft.chronicle.core.StackTrace;
 import net.openhft.chronicle.core.annotation.UsedViaReflection;
 import net.openhft.chronicle.core.io.AbstractCloseable;
+import net.openhft.chronicle.core.io.ClosedIllegalStateException;
 import net.openhft.chronicle.core.io.IORuntimeException;
 import net.openhft.chronicle.core.threads.InterruptedRuntimeException;
 import net.openhft.chronicle.queue.ChronicleQueue;
@@ -15,6 +18,7 @@ import net.openhft.chronicle.queue.impl.ExcerptContext;
 import net.openhft.chronicle.queue.impl.WireStore;
 import net.openhft.chronicle.queue.impl.WireStorePool;
 import net.openhft.chronicle.queue.impl.table.AbstractTSQueueLock;
+import net.openhft.chronicle.queue.util.MicroTouched;
 import net.openhft.chronicle.wire.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -25,10 +29,11 @@ import java.io.IOException;
 import java.io.StreamCorruptedException;
 import java.nio.BufferOverflowException;
 
+import static net.openhft.chronicle.queue.impl.single.SingleChronicleQueue.WARN_SLOW_APPENDER_MS;
 import static net.openhft.chronicle.wire.Wires.*;
 
 class StoreAppender extends AbstractCloseable
-        implements ExcerptAppender, ExcerptContext, InternalAppender {
+        implements ExcerptAppender, ExcerptContext, InternalAppender, MicroTouched {
     @NotNull
     private final SingleChronicleQueue queue;
     @NotNull
@@ -39,8 +44,11 @@ class StoreAppender extends AbstractCloseable
     private final StoreAppenderContext writeContext;
     private final WireStorePool storePool;
     private final boolean checkInterrupts;
+    @UsedViaReflection
+    private final Finalizer finalizer;
     @Nullable
     SingleChronicleQueueStore store;
+    long lastPosition;
     private int cycle = Integer.MIN_VALUE;
     @Nullable
     private Wire wire;
@@ -48,15 +56,11 @@ class StoreAppender extends AbstractCloseable
     private Wire wireForIndex;
     private long positionOfHeader = 0;
     private long lastIndex = Long.MIN_VALUE;
-    private long lastPosition;
     private int lastCycle;
     @Nullable
     private Pretoucher pretoucher = null;
-    private NativeBytesStore<Void> batchTmp;
+    private MicroToucher microtoucher = null;
     private Wire bufferWire = null;
-    @UsedViaReflection
-    private final Finalizer finalizer;
-    private boolean disableThreadSafetyCheck;
     private int count = 0;
 
     StoreAppender(@NotNull final SingleChronicleQueue queue,
@@ -91,6 +95,12 @@ class StoreAppender extends AbstractCloseable
         finalizer = Jvm.isResourceTracing() ? new Finalizer() : null;
     }
 
+    private static void releaseBytesFor(Wire w) {
+        if (w != null) {
+            w.bytes().release(INIT);
+        }
+    }
+
     private void checkAppendLock() {
         checkAppendLock(false);
     }
@@ -118,12 +128,6 @@ class StoreAppender extends AbstractCloseable
             throw new IllegalStateException("locked: unable to append because a lock is being held by pid=" + (myPID ? "me" : lockedBy) + ", file=" + queue.file());
         } else
             throw new IllegalStateException("locked: unable to append, file=" + queue.file());
-    }
-
-    private static void releaseBytesFor(Wire w) {
-        if (w != null) {
-            w.bytes().release(INIT);
-        }
     }
 
     @Deprecated // Should not be providing accessors to reference-counted objects
@@ -190,6 +194,27 @@ class StoreAppender extends AbstractCloseable
             Jvm.warn().on(getClass(), e);
             throw Jvm.rethrow(e);
         }
+    }
+
+    @Override
+    public boolean microTouch() {
+        throwExceptionIfClosed();
+
+        if (microtoucher == null)
+            microtoucher = new MicroToucher(this);
+
+        return microtoucher.execute();
+    }
+
+    @Override
+    public void bgMicroTouch() {
+        if (isClosed())
+            throw new ClosedIllegalStateException(getClass().getName() + " closed for " + Thread.currentThread().getName(), closedHere);
+
+        if (microtoucher == null)
+            microtoucher = new MicroToucher(this);
+
+        microtoucher.bgExecute();
     }
 
     @Nullable
@@ -350,7 +375,7 @@ class StoreAppender extends AbstractCloseable
             writeContext.rollbackOnClose = false;
             writeContext.buffered = true;
             if (bufferWire == null) {
-                Bytes bufferBytes = Bytes.allocateElasticOnHeap();
+                Bytes<?> bufferBytes = Bytes.allocateElasticOnHeap();
                 bufferWire = queue().wireType().apply(bufferBytes);
             }
             writeContext.wire = bufferWire;
@@ -391,12 +416,16 @@ class StoreAppender extends AbstractCloseable
      * Ensure any missing EOF markers are added back to previous cycles
      */
     public void normaliseEOFs() {
+        long start = System.nanoTime();
         final WriteLock writeLock = queue.writeLock();
         writeLock.lock();
         try {
             normaliseEOFs0();
         } finally {
             writeLock.unlock();
+            long tookMillis = (System.nanoTime() - start) / 1_000_000;
+            if (tookMillis > WARN_SLOW_APPENDER_MS)
+                Jvm.perf().on(getClass(), "Took " + tookMillis + "ms to normaliseEOFs");
         }
     }
 
@@ -606,7 +635,9 @@ class StoreAppender extends AbstractCloseable
             openContext(metadata, safeLength);
 
             try {
-                writeContext.wire().bytes().write(bytes);
+                final Bytes<?> bytes0 = writeContext.wire().bytes();
+                bytes0.readPosition(bytes0.writePosition());
+                bytes0.write(bytes);
             } finally {
                 writeContext.close(false);
                 count = 0;
@@ -750,15 +781,9 @@ class StoreAppender extends AbstractCloseable
     }
 
     @Override
-    public @NotNull ExcerptAppender disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
-        this.disableThreadSafetyCheck = disableThreadSafetyCheck;
+    public @NotNull StoreAppender disableThreadSafetyCheck(boolean disableThreadSafetyCheck) {
+        super.disableThreadSafetyCheck(disableThreadSafetyCheck);
         return this;
-    }
-
-    @Override
-    protected boolean threadSafetyCheck(boolean isUsed) {
-        return disableThreadSafetyCheck
-                || super.threadSafetyCheck(isUsed);
     }
 
     @Override
@@ -774,6 +799,16 @@ class StoreAppender extends AbstractCloseable
             writeContext.rollbackOnClose();
             warnAndCloseIfNotClosed();
         }
+    }
+
+    @Override
+    public void clearUsedByThread() {
+        throw new UnsupportedOperationException("clearUsedByThread should never be called on a StoreAppender. They are ThreadLocal and bound to the thread they're created on.");
+    }
+
+    @Override
+    public void resetUsedByThread() {
+        throw new UnsupportedOperationException("resetUsedByThread should never be called on a StoreAppender. They are ThreadLocal and bound to the thread they're created on.");
     }
 
     final class StoreAppenderContext implements WriteDocumentContext {
@@ -849,7 +884,7 @@ class StoreAppender extends AbstractCloseable
                 }
 
                 if (wire == StoreAppender.this.wire) {
-
+//                    final BytesStore bs = wire.bytes().bytesStore();
                     try {
                         wire.updateHeader(positionOfHeader, metaData, 0);
                     } catch (IllegalStateException e) {
@@ -857,6 +892,8 @@ class StoreAppender extends AbstractCloseable
                             return;
                         throw e;
                     }
+//                    if (bs != wire.bytes().bytesStore())
+//                        throw new AssertionError("header had to rewind to be written");
 
                     lastPosition = positionOfHeader;
                     lastCycle = cycle;
@@ -864,8 +901,12 @@ class StoreAppender extends AbstractCloseable
                     if (!metaData) {
                         lastIndex(wire.headerNumber());
                         store.writePosition(positionOfHeader);
-                        if (lastIndex != Long.MIN_VALUE)
+                        if (lastIndex != Long.MIN_VALUE) {
                             writeIndexForPosition(lastIndex, positionOfHeader);
+                            if (queue.appenderListener != null) {
+                                callAppenderListener();
+                            }
+                        }
                     }
 
                 } else if (wire != null) {
@@ -892,6 +933,18 @@ class StoreAppender extends AbstractCloseable
                     } catch (Exception ex) {
                         Jvm.warn().on(getClass(), "Exception while unlocking: ", ex);
                     }
+            }
+        }
+
+        private void callAppenderListener() {
+            final Bytes<?> bytes = wire.bytes();
+            long rp = bytes.readPosition();
+            long wp = bytes.writePosition();
+            try {
+                queue.appenderListener.onExcerpt(wire, lastIndex);
+            } finally {
+                bytes.readPosition(rp);
+                bytes.writePosition(wp);
             }
         }
 

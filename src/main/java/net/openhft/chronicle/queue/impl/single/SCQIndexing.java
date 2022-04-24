@@ -40,6 +40,7 @@ import java.io.StreamCorruptedException;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static net.openhft.chronicle.core.io.Closeable.closeQuietly;
@@ -64,6 +65,9 @@ class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMars
     private final WriteMarshallable index2IndexTemplate;
     @NotNull
     private final WriteMarshallable indexTemplate;
+    /** Extracted as field to prevent lambda creation on every method reference pass. */
+    private final Function<Supplier<LongArrayValues>, LongArrayValuesHolder> arrayValuesSupplierCall = this::newLogArrayValuesHolder;
+
     LongValue writePosition;
     Sequence sequence;
     // visible for testing
@@ -104,6 +108,7 @@ class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMars
         this.indexArray = CleaningThreadLocal.withCleanup(wr -> Closeable.closeQuietly(wr.get()));
         this.index2IndexTemplate = w -> w.writeEventName("index2index").int64array(indexCount);
         this.indexTemplate = w -> w.writeEventName("index").int64array(indexCount);
+        disableThreadSafetyCheck(true);
     }
 
     private LongArrayValuesHolder newLogArrayValuesHolder(Supplier<LongArrayValues> las) {
@@ -115,12 +120,12 @@ class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMars
 
     @NotNull
     private LongArrayValuesHolder getIndex2IndexArray() {
-        return ThreadLocalHelper.getTL(index2indexArray, longArraySupplier, this::newLogArrayValuesHolder);
+        return ThreadLocalHelper.getTL(index2indexArray, longArraySupplier, arrayValuesSupplierCall);
     }
 
     @NotNull
     private LongArrayValuesHolder getIndexArray() {
-        return ThreadLocalHelper.getTL(indexArray, longArraySupplier, this::newLogArrayValuesHolder);
+        return ThreadLocalHelper.getTL(indexArray, longArraySupplier, arrayValuesSupplierCall);
     }
 
     public long toAddress0(long index) {
@@ -268,47 +273,46 @@ class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMars
     // visible for testing
     @Nullable
     ScanResult moveToIndex0(@NotNull final ExcerptContext ec, final long index) {
+        if (index2Index.getVolatileValue() == NOT_INITIALIZED)
+            return null;
 
-        try {
-            Wire wire = ec.wireForIndex();
-            LongArrayValues index2index = getIndex2index(wire);
-            long primaryOffset = toAddress0(index);
+        Wire wire = ec.wireForIndex();
+        LongArrayValues index2index = getIndex2index(wire);
+        long primaryOffset = toAddress0(index);
 
-            long secondaryAddress = 0;
-            long startIndex = index & -indexSpacing;
-            while (primaryOffset >= 0) {
-                secondaryAddress = index2index.getValueAt(primaryOffset);
-                if (secondaryAddress != 0)
-                    break;
-                startIndex -= indexCount * indexSpacing;
-                primaryOffset--;
-            }
-
-            if (secondaryAddress <= 0) {
-                return null;
-            }
-            @NotNull final LongArrayValues array1 = arrayForAddress(wire, secondaryAddress);
-            long secondaryOffset = toAddress1(index);
-
-            do {
-                long fromAddress = array1.getValueAt(secondaryOffset);
-                if (fromAddress == 0) {
-                    secondaryOffset--;
-                    startIndex -= indexSpacing;
-                    continue;
-                }
-
-                if (index == startIndex) {
-                    ec.wire().bytes().readPositionUnlimited(fromAddress);
-                    return ScanResult.FOUND;
-                } else {
-                    return linearScan(ec.wire(), index, startIndex, fromAddress);
-                }
-            } while (secondaryOffset >= 0);
-            return null; // no index,
-        } catch (IllegalStateException e) {
-            return linearScan(ec.wire(), index, -1, 0);
+        long secondaryAddress = 0;
+        long startIndex = index & -indexSpacing;
+        while (primaryOffset >= 0) {
+            secondaryAddress = index2index.getValueAt(primaryOffset);
+            if (secondaryAddress != 0)
+                break;
+            startIndex -= indexCount * indexSpacing;
+            primaryOffset--;
         }
+
+        if (secondaryAddress <= 0) {
+            return null;
+        }
+        @NotNull final LongArrayValues array1 = arrayForAddress(wire, secondaryAddress);
+        long secondaryOffset = toAddress1(index);
+
+        do {
+            long fromAddress = array1.getValueAt(secondaryOffset);
+            if (fromAddress == 0) {
+                secondaryOffset--;
+                startIndex -= indexSpacing;
+                continue;
+            }
+
+            if (index == startIndex) {
+                ec.wire().bytes().readPositionUnlimited(fromAddress);
+                return ScanResult.FOUND;
+            } else {
+                return linearScan(ec.wire(), index, startIndex, fromAddress);
+            }
+        } while (secondaryOffset >= 0);
+
+        return null; // no index,
     }
 
     /**
@@ -653,12 +657,12 @@ class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMars
         return (index & (indexSpacing - 1)) == 0;
     }
 
-    public long lastSequenceNumber(@NotNull ExcerptContext ec)
+    public long lastSequenceNumber(@NotNull ExcerptContext ec, boolean approximate)
             throws StreamCorruptedException {
         throwExceptionIfClosed();
 
         Sequence sequence1 = this.sequence;
-        if (sequence1 != null) {
+        if (approximate && sequence1 != null) {
             for (int i = 0; i < 128; i++) {
 
                 long address = writePosition.getVolatileValue(0);
@@ -674,11 +678,6 @@ class SCQIndexing extends AbstractCloseable implements Demarshallable, WriteMars
         }
 
         return sequenceForPosition(ec, Long.MAX_VALUE, false);
-    }
-
-    @Override
-    protected boolean threadSafetyCheck(boolean isUsed) {
-        return true;
     }
 
     int indexCount() {

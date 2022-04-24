@@ -66,6 +66,7 @@ public class SingleChronicleQueueStore extends AbstractCloseable implements Wire
      */
     @UsedViaReflection
     private SingleChronicleQueueStore(@NotNull WireIn wire) {
+        boolean failed = true;
         assert wire.startUse();
         try {
             writePosition = loadWritePosition(wire);
@@ -82,7 +83,11 @@ public class SingleChronicleQueueStore extends AbstractCloseable implements Wire
             } else
                 this.dataVersion = 0;
 
+            disableThreadSafetyCheck(true);
+            failed = false;
         } finally {
+            if (failed)
+                close();
             assert wire.endUse();
         }
     }
@@ -111,6 +116,8 @@ public class SingleChronicleQueueStore extends AbstractCloseable implements Wire
                 rollCycle.defaultIndexCount(),
                 rollCycle.defaultIndexSpacing());
         this.dataVersion = 1;
+
+        disableThreadSafetyCheck(true);
     }
 
     @NotNull
@@ -257,12 +264,6 @@ public class SingleChronicleQueueStore extends AbstractCloseable implements Wire
     }
 
     @Override
-    protected boolean threadSafetyCheck(boolean isUsed) {
-        // disable thread safety check
-        return true;
-    }
-
-    @Override
     public long moveToEndForRead(@NotNull Wire w) {
         throwExceptionIfClosed();
 
@@ -291,7 +292,8 @@ public class SingleChronicleQueueStore extends AbstractCloseable implements Wire
     public MappedBytes bytes() {
         throwExceptionIfClosed();
 
-        return MappedBytes.mappedBytes(mappedFile);
+        return MappedBytes.mappedBytes(mappedFile)
+                .disableThreadSafetyCheck(true);
     }
 
     @Override
@@ -302,10 +304,19 @@ public class SingleChronicleQueueStore extends AbstractCloseable implements Wire
     }
 
     @Override
+    @Deprecated
     public long lastSequenceNumber(@NotNull ExcerptContext ec) throws StreamCorruptedException {
-        throwExceptionIfClosedInSetter();
+        return approximateLastSequenceNumber(ec);
+    }
 
-        return indexing.lastSequenceNumber(ec);
+    public long approximateLastSequenceNumber(@NotNull ExcerptContext ec) throws StreamCorruptedException {
+        throwExceptionIfClosedInSetter();
+        return indexing.lastSequenceNumber(ec, true);
+    }
+
+    public long exactLastSequenceNumber(@NotNull ExcerptContext ec) throws StreamCorruptedException {
+        throwExceptionIfClosedInSetter();
+        return indexing.lastSequenceNumber(ec, false);
     }
 
     @NotNull

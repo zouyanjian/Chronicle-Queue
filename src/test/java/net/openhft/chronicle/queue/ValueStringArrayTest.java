@@ -3,6 +3,7 @@ package net.openhft.chronicle.queue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.wire.DocumentContext;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.File;
@@ -14,6 +15,8 @@ public class ValueStringArrayTest extends ChronicleQueueTestBase {
 
     @Test
     public void test() {
+        // No explicit support of putting a Value into Wire.
+        expectException("BytesMarshallable found in field which is not matching exactly");
 
         ValueStringArray value = new ValueStringArray();
         value.setCsArrItem(1, EXPECTED);
@@ -33,8 +36,7 @@ public class ValueStringArrayTest extends ChronicleQueueTestBase {
                // System.out.println(actual);
                 Assert.assertEquals(EXPECTED, actual.toString());
             }
- }
-
+         }
     }
 }
 

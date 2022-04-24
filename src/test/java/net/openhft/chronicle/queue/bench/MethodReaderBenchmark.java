@@ -22,11 +22,11 @@ import net.openhft.chronicle.bytes.Bytes;
 import net.openhft.chronicle.bytes.MethodReader;
 import net.openhft.chronicle.core.io.IORuntimeException;
 import net.openhft.chronicle.core.io.IOTools;
+import net.openhft.chronicle.core.util.NanoSampler;
 import net.openhft.chronicle.jlbh.JLBH;
 import net.openhft.chronicle.jlbh.JLBHOptions;
 import net.openhft.chronicle.jlbh.JLBHTask;
 import net.openhft.chronicle.jlbh.TeamCityHelper;
-import net.openhft.chronicle.core.util.NanoSampler;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.ExcerptAppender;
 import net.openhft.chronicle.queue.ExcerptTailer;
@@ -38,6 +38,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Random;
 import java.util.concurrent.ThreadLocalRandom;
+
+import static net.openhft.chronicle.queue.bench.BenchmarkUtils.join;
 
 public class MethodReaderBenchmark implements JLBHTask {
     private static int iterations;
@@ -59,6 +61,7 @@ public class MethodReaderBenchmark implements JLBHTask {
     private OrderDTO nextOrder;
 
     private MethodReader reader;
+    private Thread consumerThread;
 
     private volatile boolean stopped = false;
 
@@ -107,12 +110,10 @@ public class MethodReaderBenchmark implements JLBHTask {
         nextExecutionReport = new ExecutionReportDTO(ThreadLocalRandom.current());
         nextOrder = new OrderDTO(ThreadLocalRandom.current());
 
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                AffinityLock.acquireCore();
+        consumerThread = new Thread(() -> {
+            try (final AffinityLock affinityLock = AffinityLock.acquireCore()) {
 
-                tailer = queue.createTailer();
+                tailer = queue.createTailer().disableThreadSafetyCheck(true);
 
                 noArgsCallSampler = jlbh.addProbe("No args call");
                 oneIntCallSampler = jlbh.addProbe("One int call");
@@ -141,7 +142,8 @@ public class MethodReaderBenchmark implements JLBHTask {
                     }
                 }
             }
-        }).start();
+        });
+        consumerThread.start();
 
     }
 
@@ -196,6 +198,7 @@ public class MethodReaderBenchmark implements JLBHTask {
     public void complete() {
         stopped = true;
         queue.close();
+        join(consumerThread);
         TeamCityHelper.teamCityStatsLastRun(getClass().getSimpleName(), jlbh, iterations, System.out);
     }
 
@@ -288,14 +291,14 @@ public class MethodReaderBenchmark implements JLBHTask {
 
     static class ExecutionReportDTO extends SelfDescribingMarshallable {
         private String orderID;
-        private Bytes clOrdID;
+        private Bytes<?> clOrdID;
         private String execID;
         private char execTransType;
         private char execType;
         private char ordStatus;
-        private Bytes account;
+        private Bytes<?> account;
         private char settlmntTyp;
-        private Bytes securityID;
+        private Bytes<?> securityID;
         private String idSource;
         private char side;
         private double orderQty;

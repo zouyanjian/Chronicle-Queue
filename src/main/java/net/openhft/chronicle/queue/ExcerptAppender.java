@@ -46,7 +46,7 @@ public interface ExcerptAppender extends ExcerptCommon<ExcerptAppender>, Marshal
      * @param bytes to write to excerpt.
      * @throws UnrecoverableTimeoutException if the operation times out.
      */
-    default void writeBytes(@NotNull Bytes bytes) {
+    default void writeBytes(@NotNull Bytes<?> bytes) {
         writeBytes((BytesStore) bytes);
     }
 
@@ -82,6 +82,8 @@ public interface ExcerptAppender extends ExcerptCommon<ExcerptAppender>, Marshal
      * pretouch() is not thread safe. For example :
      * <p>
      * <code>newSingleThreadScheduledExecutor().scheduleAtFixedRate(() -&gt; queue.acquireAppender().pretouch(), 0, 1, TimeUnit.SECONDS);</code>
+     * <p>
+     * NOTE: This pretoucher is assumed to be called periodically at longer regular intervals such a 100 ms or 1 second.
      */
     default void pretouch() {
     }

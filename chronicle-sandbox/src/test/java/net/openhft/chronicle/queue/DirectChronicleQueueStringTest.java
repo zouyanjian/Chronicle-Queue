@@ -19,7 +19,6 @@
 package net.openhft.chronicle.queue;
 
 import net.openhft.chronicle.bytes.Bytes;
-import net.openhft.chronicle.bytes.NativeBytesStore;
 import net.openhft.chronicle.queue.impl.DirectChronicleQueue;
 import org.junit.Test;
 
@@ -82,7 +81,7 @@ public class DirectChronicleQueueStringTest {
 
     private void writeSome(DirectChronicleQueue chronicle) {
         NativeBytesStore allocate = NativeBytesStore.nativeStoreWithFixedCapacity(EXPECTED_BYTES.length);
-        final Bytes toWrite = allocate.bytes();
+        final Bytes<?> toWrite = allocate.bytes();
         for (int i = 0; i < RUNS; i++) {
             toWrite.clear();
             toWrite.write(EXPECTED_BYTES);
@@ -93,7 +92,7 @@ public class DirectChronicleQueueStringTest {
 
     private void readSome(DirectChronicleQueue chronicle) {
         NativeBytesStore allocate = NativeBytesStore.nativeStoreWithFixedCapacity(EXPECTED_BYTES.length);
-        final Bytes toRead = allocate.bytes();
+        final Bytes<?> toRead = allocate.bytes();
         AtomicLong offset = new AtomicLong(chronicle.firstBytes());
         for (int i = 0; i < RUNS; i++) {
             toRead.clear();

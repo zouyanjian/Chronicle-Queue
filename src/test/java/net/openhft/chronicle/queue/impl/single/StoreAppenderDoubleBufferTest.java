@@ -4,6 +4,7 @@ import net.openhft.chronicle.bytes.MethodReader;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.ExcerptAppender;
 import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.QueueTestCommon;
 import net.openhft.chronicle.wire.DocumentContext;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -14,23 +15,15 @@ import org.slf4j.LoggerFactory;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.concurrent.BrokenBarrierException;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.*;
 
 import static net.openhft.chronicle.queue.DirectoryUtils.tempDir;
 import static net.openhft.chronicle.queue.RollCycles.MINUTELY;
 import static net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder.binary;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
 @RunWith(Parameterized.class)
-public class StoreAppenderDoubleBufferTest {
+public class StoreAppenderDoubleBufferTest extends QueueTestCommon {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(StoreAppenderDoubleBufferTest.class);
 
@@ -180,7 +173,7 @@ public class StoreAppenderDoubleBufferTest {
         @Override
         protected void writeBlockeeRecordForIteration(int iteration, ExcerptAppender appender) {
             Foo foo = appender.methodWriterBuilder(Foo.class)
-                    .methodWriterListener((name, args) -> {
+                    .updateInterceptor((name, arg) -> {
                         if ("foo".equals(name)) {
                             try {
                                 blockeeHasDocumentContext.await();
@@ -188,8 +181,8 @@ public class StoreAppenderDoubleBufferTest {
                                 fail();
                             }
                         }
+                        return true;
                     })
-                    .recordHistory(true)
                     .build();
             foo.foo("foo").bar("bar");
         }

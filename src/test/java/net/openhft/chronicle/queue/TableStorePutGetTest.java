@@ -34,11 +34,12 @@ public class TableStorePutGetTest extends QueueTestCommon {
                     assertEquals("world", dc.wire().getValueIn().text());
                 }
             }
-            assertEquals("--- !!meta-data #binary\n" +
+            assertEquals("" +
+                    "--- !!meta-data #binary\n" +
                     "header: !STStore {\n" +
                     "  wireType: !WireType BINARY_LIGHT,\n" +
                     "  metadata: !SCQMeta {\n" +
-                    "    roll: !SCQSRoll { length: !int 86400000, format: yyyyMMdd'T1', epoch: 0 },\n" +
+                    "    roll: !SCQSRoll { length: 86400000, format: yyyyMMdd'T1', epoch: 0 },\n" +
                     "    deltaCheckpointInterval: 64,\n" +
                     "    sourceId: 0\n" +
                     "  }\n" +
@@ -63,13 +64,13 @@ public class TableStorePutGetTest extends QueueTestCommon {
                     "--- !!meta-data #binary\n" +
                     "header: !SCQStore {\n" +
                     "  writePosition: [\n" +
-                    "    392,\n" +
-                    "    1683627180032\n" +
+                    "    400,\n" +
+                    "    1717986918400\n" +
                     "  ],\n" +
                     "  indexing: !SCQSIndexing {\n" +
                     "    indexCount: 8,\n" +
                     "    indexSpacing: 1,\n" +
-                    "    index2Index: 196,\n" +
+                    "    index2Index: 200,\n" +
                     "    lastIndex: 1\n" +
                     "  },\n" +
                     "  dataFormat: 1\n" +
@@ -77,13 +78,13 @@ public class TableStorePutGetTest extends QueueTestCommon {
                     "--- !!meta-data #binary\n" +
                     "index2index: [\n" +
                     "  # length: 8, used: 1\n" +
-                    "  296,\n" +
+                    "  304,\n" +
                     "  0, 0, 0, 0, 0, 0, 0\n" +
                     "]\n" +
                     "--- !!meta-data #binary\n" +
                     "index: [\n" +
                     "  # length: 8, used: 1\n" +
-                    "  392,\n" +
+                    "  400,\n" +
                     "  0, 0, 0, 0, 0, 0, 0\n" +
                     "]\n" +
                     "--- !!data #binary\n" +
@@ -96,15 +97,27 @@ public class TableStorePutGetTest extends QueueTestCommon {
     public void manyEntries() {
         try (SingleChronicleQueue cq = ChronicleQueue.singleBuilder(DirectoryUtils.tempDir("manyEntries"))
                 .rollCycle(RollCycles.TEST_DAILY)
+                .blockSize(64 << 10)
+                .build()) {
+            for (int j = 0; j < 2280; j++) {
+                cq.tableStorePut("=hello" + j, j);
+            }
+        }
+    }
+
+    /**
+     * While the assumption is the TableStore doesn't grow, we should test what happens if it does
+     * <p>
+     * (see https://github.com/OpenHFT/Chronicle-Queue/issues/1025)
+     */
+    @Test
+    public void testCanGrowBeyondInitialSize() {
+        try (SingleChronicleQueue cq = ChronicleQueue.singleBuilder(DirectoryUtils.tempDir("canGrow"))
+                .rollCycle(RollCycles.TEST_DAILY)
                 .testBlockSize()
                 .build()) {
-            for (int j = 0; j < 20000; j += 1000) {
-                long start = System.nanoTime();
-                for (int i = 0; i < 1000; i++) {
-                    cq.tableStorePut("=hello" + (j + i), i);
-                }
-                long end = System.nanoTime() - start;
-               // System.out.println(j + ": " + end / 1000 / 1e3 + " us/entry");
+            for (int j = 0; j < 4_000; j++) {
+                cq.tableStorePut("=this_is_a_long_key_to_try_and_consume_space_quicker_" + j, j);
             }
         }
     }

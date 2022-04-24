@@ -36,7 +36,7 @@ public class QueueLargeMessageJLBHBenchmark implements JLBHTask {
     private static final int MSG_LENGTH = Integer.getInteger("length", 1_000_000);
     private static final boolean MSG_DIRECT = Jvm.getBoolean("direct");
     static byte[] bytesArr = new byte[MSG_LENGTH];
-    static Bytes bytesArr2 = Bytes.allocateDirect(MSG_LENGTH);
+    static Bytes<?> bytesArr2 = Bytes.allocateDirect(MSG_LENGTH);
     private static int iterations;
     private SingleChronicleQueue sourceQueue;
     private SingleChronicleQueue sinkQueue;
@@ -67,7 +67,7 @@ public class QueueLargeMessageJLBHBenchmark implements JLBHTask {
         sourceQueue = single("large").blockSize(1L << 30).build();
         sinkQueue = single("large").blockSize(1L << 30).build();
         appender = sourceQueue.acquireAppender();
-        tailer = sinkQueue.createTailer();
+        tailer = sinkQueue.createTailer().disableThreadSafetyCheck(true);
         this.jlbh = jlbh;
     }
 

@@ -1,5 +1,4 @@
 = Frequently Asked Questions about Chronicle Queue
-Neil Clifford
 :toc: manual
 :toclevels: 1
 :css-signature: demo
@@ -285,7 +284,7 @@ You can access the bytes in wire as follows:
 ----
 try (DocumentContext dc = appender.writingDocument()) {
     Wire wire = dc.wire();
-    Bytes bytes = wire.bytes();
+    Bytes<?> bytes = wire.bytes();
     // write to bytes
 }
 ----
@@ -295,7 +294,7 @@ try (DocumentContext dc = appender.writingDocument()) {
 ----
 try (DocumentContext dc = tailer.readingDocument()) {
     Wire wire = dc.wire();
-    Bytes bytes = wire.bytes();
+    Bytes<?> bytes = wire.bytes();
     // read from the bytes
 }
 ----
@@ -307,7 +306,7 @@ You can use `isPresent()` to check that there is data to read.
 try (DocumentContext dc = tailer.readingDocument()) {
     if(!dc.isPresent()) // this will tell you if there is any data  to read
         return;
-    Bytes bytes = dc.wire().bytes();
+    Bytes<?> bytes = dc.wire().bytes();
     // read from the bytes
 }
 ----
@@ -321,7 +320,7 @@ You can access native memory:
 ----
 try (DocumentContext dc = appender.writingDocument()) {
     Wire wire = dc.wire();
-    Bytes bytes = wire.bytes();
+    Bytes<?> bytes = wire.bytes();
     long address = bytes.address(bytes.readPosition());
     // write to native memory
     bytes.writeSkip(lengthActuallyWritten);
@@ -333,7 +332,7 @@ try (DocumentContext dc = appender.writingDocument()) {
 ----
 try (DocumentContext dc = appender.writingDocument()) {
     Wire wire = dc.wire();
-    Bytes bytes = wire.bytes();
+    Bytes<?> bytes = wire.bytes();
     long address = bytes.address(bytes.readPosition());
     long length = bytes.readRemaining();
     // read from native memory
@@ -623,7 +622,7 @@ You need to ensure that:
 
 Our performance tests have shown minimal performance degradation when compared to running directly on the host.
 
-If your containers are running on separate hosts then you will need to use
+If your containers are running on separate hosts, or your queues are not bind-mounted from the host, then you will need to use
 link:replication.adoc[Queue Replication].
 
 === Can I use Chronicle Queue v3 and v4 in the same project?

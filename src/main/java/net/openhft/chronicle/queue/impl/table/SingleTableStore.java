@@ -57,7 +57,7 @@ public class SingleTableStore<T extends Metadata> extends AbstractCloseable impl
      */
     private static final long EXCLUSIVE_LOCK_START = Long.MAX_VALUE - EXCLUSIVE_LOCK_SIZE;
 
-    private static final long timeoutMS = Long.getLong("chronicle.table.store.timeoutMS", 10_000);
+    private static final long timeoutMS = Jvm.getLong("chronicle.table.store.timeoutMS", 10_000L);
     @NotNull
     private final WireType wireType;
     @NotNull
@@ -93,6 +93,8 @@ public class SingleTableStore<T extends Metadata> extends AbstractCloseable impl
 
             mappedWire = wireType.apply(mappedBytes);
             mappedWire.usePadding(true);
+
+            disableThreadSafetyCheck(true);
         } finally {
             assert wire.endUse();
         }
@@ -111,6 +113,8 @@ public class SingleTableStore<T extends Metadata> extends AbstractCloseable impl
         this.mappedFile = mappedBytes.mappedFile();
         mappedWire = wireType.apply(mappedBytes);
         mappedWire.usePadding(true);
+
+        disableThreadSafetyCheck(true);
     }
 
     public static <T, R> R doWithSharedLock(@NotNull final File file,
@@ -262,12 +266,10 @@ public class SingleTableStore<T extends Metadata> extends AbstractCloseable impl
                 }
                 mappedBytes.readPosition(readPosition + length);
             }
-            // not found
-            final long safeLength = mappedBytes.realCapacity() - mappedBytes.readPosition();
             mappedBytes.writeLimit(mappedBytes.realCapacity());
             long start = mappedBytes.readPosition();
             mappedBytes.writePosition(start);
-            final long pos = mappedWire.enterHeader(safeLength);
+            final long pos = mappedWire.enterHeader(128L);
             final LongValue longValue = wireType.newLongReference().get();
             mappedWire.writeEventName(key).int64forBinding(defaultValue, longValue);
             mappedWire.writeAlignTo(Integer.BYTES, 0);
@@ -327,9 +329,4 @@ public class SingleTableStore<T extends Metadata> extends AbstractCloseable impl
         return metadata;
     }
 
-    @Override
-    protected boolean threadSafetyCheck(final boolean isUsed) {
-        // TableStore are thread safe
-        return true;
-    }
 }

@@ -21,6 +21,7 @@ import net.openhft.chronicle.core.StackTrace;
 import net.openhft.chronicle.core.threads.InterruptedRuntimeException;
 import net.openhft.chronicle.queue.impl.TableStore;
 import net.openhft.chronicle.queue.impl.table.AbstractTSQueueLock;
+import net.openhft.chronicle.queue.impl.table.UnlockMode;
 import net.openhft.chronicle.threads.TimingPauser;
 import net.openhft.chronicle.wire.UnrecoverableTimeoutException;
 import org.jetbrains.annotations.NotNull;
@@ -31,6 +32,12 @@ import java.util.function.Supplier;
 
 import static net.openhft.chronicle.core.Jvm.warn;
 
+/**
+ * Implements {@link WriteLock} using memory access primitives - see {@link AbstractTSQueueLock}.
+ * <p>
+ * WARNING: the default behaviour (see also {@code queue.dont.recover.lock.timeout} system property) is
+ * for a timed-out lock to be overridden.
+ */
 public class TableStoreWriteLock extends AbstractTSQueueLock implements WriteLock {
     public static final String APPEND_LOCK_KEY = "chronicle.append.lock";
     private static final String LOCK_KEY = "chronicle.write.lock";
@@ -58,15 +65,15 @@ public class TableStoreWriteLock extends AbstractTSQueueLock implements WriteLoc
 
         assert checkNotAlreadyLocked();
 
-        long value = 0;
+        long currentLockValue = 0;
         TimingPauser tlPauser = pauser.get();
         try {
-            value = lock.getVolatileValue();
+            currentLockValue = lock.getVolatileValue();
             while (!lock.compareAndSwapValue(UNLOCKED, PID)) {
                 if (Thread.currentThread().isInterrupted())
                     throw new InterruptedRuntimeException("Interrupted for the lock file:" + path);
                 tlPauser.pause(timeout, TimeUnit.MILLISECONDS);
-                value = lock.getVolatileValue();
+                currentLockValue = lock.getVolatileValue();
             }
 
             //noinspection ConstantConditions,AssertWithSideEffects
@@ -75,18 +82,23 @@ public class TableStoreWriteLock extends AbstractTSQueueLock implements WriteLoc
 
             // success
         } catch (TimeoutException e) {
-            final String lockedBy = getLockedBy(value);
+            final String lockedBy = getLockedBy(currentLockValue);
             final String warningMsg = "Couldn't acquire write lock " +
                     "after " + timeout + " ms " +
                     "for the lock file:" + path + ". " +
                     "Lock was held by " + lockedBy;
-            if (dontRecoverLockTimeout)
-                throw new UnrecoverableTimeoutException(new IllegalStateException(warningMsg));
-            warn().on(getClass(), warningMsg + ". Unlocking forcibly");
-            forceUnlock(value);
-            // we should reset the pauser after a timeout exception
-            tlPauser.reset();
-            lock();
+            if (forceUnlockOnTimeoutWhen == UnlockMode.NEVER)
+                throw new UnrecoverableTimeoutException(new IllegalStateException(warningMsg + UNLOCK_MAIN_MSG));
+            else if (forceUnlockOnTimeoutWhen == UnlockMode.LOCKING_PROCESS_DEAD) {
+                if (forceUnlockIfProcessIsDead())
+                    lock();
+                else
+                    throw new UnrecoverableTimeoutException(new IllegalStateException(warningMsg + UNLOCK_MAIN_MSG));
+            } else {
+                warn().on(getClass(), warningMsg + UNLOCKING_FORCIBLY_MSG);
+                forceUnlock(currentLockValue);
+                lock();
+            }
         } finally {
             tlPauser.reset();
         }
